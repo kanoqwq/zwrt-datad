@@ -86,7 +86,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             servers: Vec::new(),
             sources: default_sources(),
         }
@@ -279,9 +279,12 @@ impl Ota {
             .iter()
             .map(|(name, pem)| parse_public_key(pem).map(|key| (*name, key)))
             .collect::<Result<Vec<_>, _>>()?;
-        let config = read_json::<Config>(&dir.join("ota.json"))
+        let mut config = read_json::<Config>(&dir.join("ota.json"))
             .filter(|value| validate_config(value).is_ok())
             .unwrap_or_default();
+        // This build permits only explicitly requested local updates. A saved
+        // setting from an older release must not re-enable background installs.
+        config.enabled = false;
         let mut status = read_json::<Status>(&dir.join("ota-state.json")).unwrap_or_default();
         status.current_version = env!("DATAD_VERSION").into();
         status.source = source_name(&status.source).into();
@@ -351,6 +354,7 @@ impl Ota {
             .as_ref()
             .filter(|c| has_update(c) && self.status.signature_verified);
         self.view.send_replace(json!({"status":self.status,"config":self.config,
+            "automatic_updates_allowed":false, "remote_install_allowed":false,
             "busy": self.busy || self.status.state == "installing", "platform":self.profile.manifest,
             "candidate":candidate.map(|c| json!({"id":Self::candidate_id(c),"manifest":c.manifest}))}));
     }
@@ -402,7 +406,7 @@ impl Ota {
     /// checks and installs only run when `auto` is set.
     pub async fn tick(&mut self, auto: bool, snapshot: &Value) {
         self.reconcile_install_result();
-        if !auto {
+        if !auto || auto_updates_disabled() {
             return;
         }
         if self.should_auto_check() && self.begin_update().is_ok() {
@@ -432,6 +436,7 @@ impl Ota {
             return Err("更新任务正在运行".into());
         }
         validate_config(&config)?;
+        config.enabled = false;
         for server in &mut config.servers {
             *server = server.trim().trim_end_matches('/').to_owned();
         }
@@ -629,6 +634,9 @@ impl Ota {
         snapshot: &Value,
         manual: bool,
     ) -> Result<PathBuf, String> {
+        if !manual && auto_updates_disabled() {
+            return Err("automatic_updates_disabled".into());
+        }
         let mut reasons = self.safety(snapshot, manual);
         if self.profile.download_in_process {
             let binary = candidate
@@ -821,7 +829,8 @@ mv -f {marker}.tmp {marker}
     }
 
     pub fn auto_candidate(&mut self) -> Option<Candidate> {
-        if !self.config.enabled
+        if auto_updates_disabled()
+            || !self.config.enabled
             || self.busy
             || self.status.state == "installing"
             || self.status.next_retry_at > now()
@@ -842,7 +851,8 @@ mv -f {marker}.tmp {marker}
     }
 
     pub fn should_auto_check(&self) -> bool {
-        self.config.enabled
+        !auto_updates_disabled()
+            && self.config.enabled
             && !self.busy
             && self.status.state != "installing"
             && self.status.next_retry_at <= now()
@@ -966,14 +976,11 @@ mv -f {marker}.tmp {marker}
     }
 }
 
-/// `ZWRT_DATAD_OTA_DISABLE_AUTO=1` turns automatic checks and installs off.
-/// Installation results are still reconciled either way.
+/// Background updates are disabled in this build, regardless of saved settings
+/// or environment variables. Explicit local checks/installs retain signatures.
+/// Installation results are still reconciled.
 pub fn auto_updates_disabled() -> bool {
-    auto_disabled(std::env::var("ZWRT_DATAD_OTA_DISABLE_AUTO").ok().as_deref())
-}
-
-fn auto_disabled(value: Option<&str>) -> bool {
-    value == Some("1")
+    true
 }
 
 pub fn has_update(candidate: &Candidate) -> bool {
@@ -1270,8 +1277,8 @@ mod tests {
         let manifest = Manifest {
             notes: String::new(),
             schema: 1,
-            version: "99.0.0".into(),
-            tag: "v99.0.0".into(),
+            version: "100000.0.0".into(),
+            tag: "v100000.0.0".into(),
             published_at: "2026-09-14T00:00:00Z".into(),
             artifacts: BTreeMap::from([
                 (
@@ -1354,7 +1361,7 @@ mod tests {
         ota.config.sources = vec!["custom".into()];
         let candidate = ota.check().await.unwrap();
         assert_eq!(candidate.base_url, format!("http://{address}/good"));
-        assert_eq!(candidate.manifest.version, "99.0.0");
+        assert_eq!(candidate.manifest.version, "100000.0.0");
         assert!(ota.status.signature_verified);
         assert_eq!(ota.status.signature_key, "test");
         let id = Ota::candidate_id(&candidate);
@@ -1389,8 +1396,8 @@ mod tests {
         let manifest = Manifest {
             notes: String::new(),
             schema: 1,
-            version: "99.0.0".into(),
-            tag: "v99.0.0".into(),
+            version: "100000.0.0".into(),
+            tag: "v100000.0.0".into(),
             published_at: "2026-09-30T00:00:00Z".into(),
             artifacts: BTreeMap::from([
                 (
@@ -1497,7 +1504,7 @@ mod tests {
 
         ota.config.servers = vec![format!("http://{address}/x")];
         let candidate = ota.check().await.unwrap();
-        assert_eq!(candidate.manifest.version, "99.0.0");
+        assert_eq!(candidate.manifest.version, "100000.0.0");
 
         // The snapshot's root filesystem may be full; U50 checks actual /tmp + install mounts.
         assert!(
@@ -1607,7 +1614,7 @@ mod tests {
         let mut ota = Ota::load_with(&dir, Profile::U50).unwrap();
         ota.status.state = "installing".into();
         ota.status.install_started_at = now();
-        ota.status.latest_version = "99.0.0".into();
+        ota.status.latest_version = "100000.0.0".into();
         ota.save_status();
         let mut restarted = Ota::load_with(&dir, Profile::U50).unwrap();
         assert!(restarted.subscribe().borrow()["busy"].as_bool().unwrap());
@@ -1665,14 +1672,36 @@ mod tests {
         assert_eq!(ota.status.state, "succeeded");
         assert!(!dir.join("ota-install-result").exists());
         // Automatic updates would be due now, but none was started.
-        assert!(ota.should_auto_check());
+        assert!(!ota.should_auto_check());
         assert_eq!(ota.last_auto_check, 0);
         assert!(!ota.busy);
         assert_eq!(ota.status.state, "succeeded");
-        assert!(auto_disabled(Some("1")));
-        assert!(!auto_disabled(Some("0")));
-        assert!(!auto_disabled(None));
+        assert!(auto_updates_disabled());
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn saved_config_and_tick_cannot_enable_unattended_updates() {
+        let dir = std::env::temp_dir().join(format!("ota-disabled-{}", rand::random::<u64>()));
+        fs::create_dir_all(&dir).unwrap();
+        atomic_json(&dir.join("ota.json"), &json!({"enabled":true}), 0o600).unwrap();
+        let mut ota = Ota::load_with(&dir, Profile::U50).unwrap();
+        assert!(!ota.config.enabled);
+        let requested = Config {
+            enabled: true,
+            ..Config::default()
+        };
+        ota.update_config(requested).unwrap();
+        assert!(!ota.config.enabled);
+        assert!(!Ota::load_with(&dir, Profile::U50).unwrap().config.enabled);
+        // Even a future caller passing auto=true cannot bypass the build policy.
+        ota.config.enabled = true;
+        ota.tick(true, &Value::Null).await;
+        assert!(!ota.should_auto_check());
+        assert!(ota.auto_candidate().is_none());
+        assert_eq!(ota.last_auto_check, 0);
+        assert_eq!(ota.status.state, "idle");
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1680,7 +1709,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("zwrt-ota-expired-{}", rand::random::<u64>()));
         let mut ota = Ota::load_with(&dir, Profile::U50).unwrap();
         ota.status.state = "installing".into();
-        ota.status.latest_version = "99.0.0".into();
+        ota.status.latest_version = "100000.0.0".into();
         ota.status.install_started_at = now() - 1801;
         ota.save_status();
         assert!(!dir.join("ota-install-result").exists());

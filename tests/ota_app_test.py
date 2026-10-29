@@ -71,6 +71,11 @@ with tempfile.TemporaryDirectory(prefix='datad-automation-') as tmp:
         code, state, cache = call(lan,'/ota/app',token)
         assert code == 200 and cache == 'no-store' and not state['busy']
         assert state['platform'] == 'update.json' and state['candidate'] is None
+        assert state['config']['enabled'] is False
+        assert state['automatic_updates_allowed'] is False
+        assert state['remote_install_allowed'] is False
+        # A client or old saved config cannot turn background updates back on.
+        assert call(lan,'/ota/app/config',token,{'enabled':True})[1]['config']['enabled'] is False
         config = {'enabled':False,'servers':['https://updates.example.test/datad'],'sources':['custom']}
         assert call(lan,'/ota/app/config',token,config)[0] == 200
         assert call(local,'/ota/app',token)[1]['config'] == config

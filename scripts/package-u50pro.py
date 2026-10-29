@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 def render_installer(binary, version, base_url=""):
     if len(binary) < 64 or binary[:6] != b"\x7fELF\x01\x01" or binary[18:20] != b"\x28\x00":
         raise ValueError("expected ELF32 little-endian ARM binary")
-    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+    if not re.fullmatch(r"(?:99999|\d+\.\d+\.\d+)", version):
         raise ValueError("invalid version")
     if base_url:
         url = urlsplit(base_url)

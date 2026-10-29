@@ -819,7 +819,9 @@ async fn report(
     panel_available: bool,
 ) -> Result<(), String> {
     let state = serde_json::to_value(snapshot).unwrap_or(Value::Null);
-    let mut capabilities = vec!["datad.update", "datad.remote", "datad.remote_origins"];
+    // This build rejects remote installs; do not advertise an update action
+    // that the NMS cannot execute.
+    let mut capabilities = vec!["datad.remote", "datad.remote_origins"];
     if webshell_available {
         capabilities.push("datad.webshell");
     }

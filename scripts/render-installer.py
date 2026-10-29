@@ -16,7 +16,7 @@ args = parser.parse_args()
 manifest_bytes = (root / "version.json").read_bytes()
 document = json.loads(manifest_bytes)
 manifest = document["datad"]
-if document.get("schema") != 1 or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", manifest["version"]) or manifest["asset"] != "zwrt-datad-aarch64":
+if document.get("schema") != 1 or not re.fullmatch(r"(?:99999|[0-9]+\.[0-9]+\.[0-9]+)", manifest["version"]) or manifest["asset"] != "zwrt-datad-aarch64":
     parser.error("invalid release version/schema/asset name")
 binary = args.binary.read_bytes()
 if args.profile == "armv7":

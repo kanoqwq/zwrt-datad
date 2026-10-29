@@ -118,7 +118,7 @@ try {
     }
     $verified = Device-Shell "cd $remoteStage && sha256sum -c SHA256SUMS && chmod 700 zwrt-datad && . ./service-control.sh && run_timeout 10 ./zwrt-datad --version"
     Write-Host $verified.Output
-    if ($verified.Output -notmatch '(?m)^zwrt-datad \d+\.\d+\.\d+\s*$') { throw 'Unexpected binary version response; existing service unchanged' }
+    if ($verified.Output -notmatch '(?m)^zwrt-datad (?:99999|\d+\.\d+\.\d+)\s*$') { throw 'Unexpected binary version response; existing service unchanged' }
 
     Write-Host '[4/5] Installing and verifying service health...'
     # Once started, the device owns the transaction and rollback even if ADB is lost.

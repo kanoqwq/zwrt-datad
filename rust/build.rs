@@ -136,7 +136,9 @@ fn main() {
     let rest = text.split(marker).nth(1).expect("version field");
     let version = rest.split('"').nth(1).expect("version value");
     assert!(
-        version.split('.').count() == 3 && version.chars().all(|c| c.is_ascii_digit() || c == '.')
+        version == "99999"
+            || (version.split('.').count() == 3
+                && version.chars().all(|c| c.is_ascii_digit() || c == '.'))
     );
     println!("cargo:rustc-env=DATAD_VERSION={version}");
 }

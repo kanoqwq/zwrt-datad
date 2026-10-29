@@ -45,7 +45,7 @@ class FakeAdb {
         if (cmd.Contains("sha256sum -c SHA256SUMS")) {
             if (!cmd.Contains(". ./service-control.sh && run_timeout 10")) return 95;
             if (mode == "hash") return 1;
-            Console.WriteLine("zwrt-datad: OK\nzwrt-datad 0.10.68"); return 0;
+            Console.WriteLine("zwrt-datad: OK\nzwrt-datad " + (mode == "pinned" ? "99999" : "0.10.68")); return 0;
         }
         if (cmd.StartsWith("nohup sh ")) { File.WriteAllText(Path.Combine(folder, "launched"), "1"); return 0; }
         if (cmd.Contains("/result 2>/dev/null")) {
@@ -119,6 +119,10 @@ class AdbLauncherTest(unittest.TestCase):
         self.assertNotIn('\tpush\t', calls)
         self.assertNotIn('mktemp -d', calls)
         self.assertFalse((self.case / 'launched').exists())
+
+    def test_pinned_version_is_accepted(self):
+        result = self.run_installer(mode='pinned')
+        self.assertIn('[5/5] SUCCESS', result.stdout)
 
     def test_failures_before_launch_never_start_transaction(self):
         for mode in ('root', 'multiple', 'preflight', 'stage', 'push', 'hash'):

@@ -59,6 +59,9 @@ fn validate(c: &Command, config: &Config, boot: &str, now: f64) -> Result<(), St
     {
         return Err("missing_verified_candidate".into());
     }
+    if c.action == "datad.update.install" {
+        return Err("remote_install_disabled".into());
+    }
     Ok(())
 }
 fn write_record(path: &Path, value: &Value) -> Result<(), String> {
@@ -231,7 +234,10 @@ mod tests {
         assert!(validate(&c, &config, "boot", 100.0).is_err());
         c.target_version = "0.10.5".into();
         c.binary_sha256 = "a".repeat(64);
-        assert!(validate(&c, &config, "boot", 100.0).is_ok());
+        assert_eq!(
+            validate(&c, &config, "boot", 100.0).unwrap_err(),
+            "remote_install_disabled"
+        );
         c.identity = "another".into();
         assert!(validate(&c, &config, "boot", 100.0).is_err());
     }

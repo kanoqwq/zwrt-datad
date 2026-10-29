@@ -532,8 +532,8 @@ coalesced for five minutes. Existing history cannot be reconstructed retroactive
 
 All routes require an Authorization header; query tokens are not accepted. Responses are `Cache-Control: no-store`.
 
-- `GET /ota/app`: `{status, config, busy, platform, candidate}`. Status remains readable during network downloads. `candidate` is null or `{id, manifest}`; manifest optionally contains signed plaintext `notes`.
-- `POST /ota/app/config`: existing OTA `{enabled, servers, sources}` configuration. `enabled` controls automatic idle installation. Custom directories require HTTPS and the **same official Ed25519 signature** as built-in sources; this is mirror selection, not arbitrary binary installation. Configuration changes invalidate the previous candidate.
+- `GET /ota/app`: `{status, config, busy, platform, candidate, automatic_updates_allowed, remote_install_allowed}`. The `99999` build reports both policy flags as false. Status remains readable during network downloads. `candidate` is null or `{id, manifest}`; manifest optionally contains signed plaintext `notes`.
+- `POST /ota/app/config`: existing OTA `{enabled, servers, sources}` configuration. This build forces `enabled` to false, including settings loaded from older releases; unattended checks/installs cannot be re-enabled. Custom directories require HTTPS and a trusted Ed25519 signature; this is mirror selection, not arbitrary binary installation. Configuration changes invalidate the previous candidate.
 - `POST /ota/app/check` with `{}`: 202 schedules a check; poll status. 409 indicates another job is running.
 - `POST /ota/app/install` with `{candidate_id: "<id returned above>"}`: 202 schedules installation of exactly that checked manifest and source. Stale/missing candidates or concurrent jobs return 409. No URL, hash or shell command is accepted from the App.
 
