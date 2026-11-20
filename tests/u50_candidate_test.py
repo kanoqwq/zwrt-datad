@@ -198,7 +198,7 @@ printf 'Station b8:d4:bc:00:00:01 (on wlan0)\\nStation aa:bb:cc:00:11:22 (on wla
             # Mainline-style local OTA API: config, status and rejection of bad input.
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/ota/status", timeout=2) as response:
                 status = json.load(response)
-                assert status["status"]["state"] == "idle" and status["enabled"] is True
+                assert status["status"]["state"] == "idle" and status["enabled"] is False
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/ota/config", timeout=2) as response:
                 assert json.load(response)["config"]["sources"] == ["custom", "netdisk", "github"]
             bad = urllib.request.Request(f"http://127.0.0.1:{port}/ota/config", data=b'{"servers":["http://192.168.0.9/x"]}',
@@ -238,8 +238,13 @@ printf 'Station b8:d4:bc:00:00:01 (on wlan0)\\nStation aa:bb:cc:00:11:22 (on wla
                                           data=b'{"enabled":true,"servers":[],"sources":["github"]}',
                                           headers={"Content-Type": "application/json"}, method="POST")
             with urllib.request.urlopen(save, timeout=2) as response:
-                assert json.load(response)["success"] is True
+                saved_config = json.load(response)
+                assert saved_config["success"] is True
+                assert saved_config["config"]["enabled"] is False
             assert (legacy_dir / "ota.json").exists(), "state must live next to cloud.json"
+            assert json.loads((legacy_dir / "ota.json").read_text())["enabled"] is False
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/ota/status", timeout=2) as response:
+                assert json.load(response)["enabled"] is False
         finally:
             legacy.terminate()
             legacy.wait(timeout=5)
