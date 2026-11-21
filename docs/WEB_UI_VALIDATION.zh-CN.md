@@ -1,5 +1,15 @@
 # Web 移植验证结果（2026-11-20）
 
+## 2026-11-22：按设备能力提供 Wi-Fi 6 模式
+
+- 网页热点页读取 `wifi.status.wireless_modes`，仅在设备提供可选模式时显示无线模式；普通 SSID 保存不提交模式字段，模式修改回读后才确认配置一致。
+- U50 写前同时检查 `iw phy` 的对应频段 AP/HE 能力及原厂高级配置；未知能力、仅 Station HE、错误频段和访客段均不授权 AX。射频写入保留国家码、带宽及未修改的信道，串行处理配置请求。
+- Rust 256 项、Node 38 项、App 业务浏览器、U50 平台、原有通用 Wi-Fi 控制、Web HTTP 鉴权与资源检查均通过；Clippy `-D warnings` 和默认纯 API 检查通过。平台用例包括不支持时拒绝且不先修改 SSID、无变化不写、模式往返，以及原厂成功但未应用时回读失败且不重放。
+- 已通过既有 ADB 安装事务部署 MU5120，启动健康检查通过，根分区恢复只读。5 GHz 实机往返验证等待 AP 实际开台：启用后 `state=ENABLED / ieee80211ax=1`，恢复后 `state=ENABLED / ieee80211ax=0`；SSID、密钥、原信道及其他热点配置保持一致。2.4 GHz 已核对真实驱动能力，模式写入仅模拟测试，未在实机启用。
+- 160 MHz 即使主信道为 36 仍覆盖 DFS 子信道，实机报告 CAC 为 60 秒。原厂配置回读成功早于异步重启结束，不能连续快速切换来判断实际开台协议；本次最终验收使用 hostapd 运行状态。
+- ARMv7 Web 二进制 6318048 字节，SHA256：`418d086b58ed6b44ceabbbfb927c298d7982e7eb88830393de877b0670531372`。`deploy_kano` 的二进制、安装脚本、tiny 引导、Go 安装器与离线 ADB 包已经整套重生成并通过一致性校验，版本仍为本地定制版本。
+- 本地证据：`build/reports/wifi6-*.log`、`build/reports/wifi6-live-result.json`、`build/deploy_kano/package-verification.json`；报告不包含口令或热点密钥。
+
 分支：`feat/optional-web-ui`。范围和逐操作入口见 [覆盖表](WEB_APP_COVERAGE.zh-CN.md)，构建/启动见 [Web说明](WEB_UI.md)。未修改 App 仓库；Web 产物经用户确认已整套同步到 `deploy_kano`，见末节。
 
 | 检查 | 结果 | 本地证据 |

@@ -35,6 +35,7 @@ state = {'ts': 1795158000, 'datad': {'version': '99999'}, 'device': {'model_name
 controls = ['sim.set_slot', 'sms.send_raw', 'sms.delete', 'oem.access.status', 'oem.access.set']
 apn = {'mode': {'apn_mode': 0}, 'enabled': {'profileId': 'automatic-1'}, 'writable': True, 'auth_modes': [0, 1, 2, 3], 'automatic': {'apnListArray': [{'profileId': 'automatic-1', 'profilename': '自动档案', 'wanapn': 'automatic', 'pdpType': 3}]}, 'manual': {'apnListArray': [{'profileId': 'manual-2', 'profilename': '手动档案', 'wanapn': 'internet', 'pdpType': 3, 'pppAuthMode': 0}]}}
 wifi = {key: {'ssid': key, 'encryption': 'psk2', 'key': 'fixture-password', 'hidden': '0', 'disabled': '0', 'maxassoc': '32', 'channel': '0'} for key in ['main_2g', 'main_5g', 'guest_2g', 'guest_5g']}
+wifi['main_5g'].update(wireless_mode='6', wireless_modes=['6', '8'])
 lan = {'supported': True, 'address_writable': False, 'ip': '192.168.0.1', 'netmask': '255.255.255.0', 'dhcp_enabled': True, 'dhcp_start': '192.168.0.2', 'dhcp_end': '192.168.0.200', 'lease_seconds': 86400, 'mtu': 1500, 'mtu_min': 576, 'mtu_max': 1500}
 tasks = {'supported': True, 'tasks': [], 'actions': ['device.reboot', 'network.set_mode', 'sim.set_slot', 'sms.send_scheduled', 'cell.lock_nr'], 'network_modes': ['WL_AND_5G', 'Only_LTE', 'Only_5G'], 'max_tasks': 16, 'device_time': '2026-11-20 10:00'}
 recovery = {'config': {'enabled': False, 'interval_seconds': 60, 'failure_threshold': 3, 'cooldown_seconds': 300, 'max_redials': 3, 'reboot_after_failures': False}, 'status': 'disabled', 'consecutive_failures': 0, 'redials': 0, 'storage_ok': True}
@@ -345,6 +346,9 @@ try:
         assert state['net']['net_select'] == 'Only_5G'
 
         go('wifi', '热点设置')
+        # Older/non-HE bands offer no mode editor; a capable radio advertises
+        # its choices, and an unrelated SSID edit never resubmits a radio mode.
+        expect(page.get_by_role('combobox', name='无线模式', exact=True)).to_have_count(1)
         page.get_by_label('SSID', exact=True).first.fill('Updated-2G')
         page.evaluate("location.hash='device'")
         page.get_by_role('dialog').filter(has_text='放弃未保存的修改？').get_by_role('button', name='取消', exact=True).click()
@@ -353,6 +357,17 @@ try:
         page.get_by_role('dialog').get_by_role('button', name='确认', exact=True).click()
         page.get_by_text('配置已回读确认，热点正在应用', exact=True).first.wait_for()
         assert wifi['main_2g']['ssid'] == 'Updated-2G' and wifi['main_2g']['channel'] == '0'
+        patch = next(t[2] for t in reversed(trace) if t[0] == 'POST' and t[1] == '/control' and t[2]['action'] == 'wifi.configure')
+        assert 'wireless_mode' not in patch['params']
+        page.get_by_role('combobox', name='无线模式', exact=True).click()
+        page.get_by_role('option', name='Wi-Fi 6 · 802.11ax', exact=True).click()
+        page.get_by_role('button', name='保存此频段', exact=True).nth(1).click()
+        page.get_by_role('dialog').get_by_role('button', name='确认', exact=True).click()
+        page.get_by_text('配置已回读确认，热点正在应用', exact=True).first.wait_for()
+        expect(page.get_by_role('combobox', name='无线模式', exact=True)).to_have_value('Wi-Fi 6 · 802.11ax')
+        patch = next(t[2] for t in reversed(trace) if t[0] == 'POST' and t[1] == '/control' and t[2]['action'] == 'wifi.configure')
+        assert patch['params']['section'] == 'main_5g' and patch['params']['wireless_mode'] == '8'
+        assert wifi['main_5g']['wireless_mode'] == '8'
 
         go('lan', 'LAN 设置')
         page.get_by_label('起始地址', exact=True).fill('192.168.0.5')

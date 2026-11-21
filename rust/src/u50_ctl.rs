@@ -27,6 +27,7 @@ pub struct Ctl {
     neighbor: Mutex<NeighborState>,
     viewers: StdMutex<ViewDemand>,
     apn_gate: Mutex<()>,
+    wifi_gate: Mutex<()>,
 }
 
 const VIEW_GRACE: Duration = Duration::from_secs(15);
@@ -116,6 +117,7 @@ pub fn install(collector: Collector, oem: Bridge) {
         neighbor: Mutex::new(NeighborState::default()),
         viewers: StdMutex::new(ViewDemand::default()),
         apn_gate: Mutex::new(()),
+        wifi_gate: Mutex::new(()),
     });
 }
 
@@ -256,6 +258,70 @@ struct WifiTarget {
     maxassoc: String,
     enabled: String,
     channel: Option<String>,
+    wireless_mode: Option<String>,
+}
+
+/// `iw phy` advertises HE separately for each band and interface type. Do not
+/// mistake station-only HE, a 6 GHz band, or a second PHY for this AP's support.
+fn wifi_he_bands(output: &str) -> [Option<bool>; 2] {
+    let mut result = [None; 2];
+    let (mut present, mut he_ap, mut ap_block) = ([false; 2], false, false);
+    let finish = |present: [bool; 2], he_ap: bool, result: &mut [Option<bool>; 2]| {
+        for (i, found) in present.into_iter().enumerate() {
+            if found {
+                result[i] = Some(result[i].unwrap_or(true) && he_ap);
+            }
+        }
+    };
+    for line in output.lines().map(str::trim) {
+        if line.starts_with("Wiphy ") || line.starts_with("Band ") {
+            finish(present, he_ap, &mut result);
+            (present, he_ap, ap_block) = ([false; 2], false, false);
+        } else if let Some(types) = line.strip_prefix("HE Iftypes:") {
+            ap_block = types.split_whitespace().any(|kind| kind == "AP");
+        } else if line.starts_with("HE PHY Capabilities:") && ap_block {
+            he_ap = true;
+        } else if let Some(frequency) = line.strip_prefix("* ")
+            && !line.contains("disabled")
+            && let Some((number, _)) = frequency.split_once(" MHz")
+            && let Ok(mhz) = number.parse::<u32>()
+        {
+            if (2400..2500).contains(&mhz) {
+                present[0] = true;
+            } else if (4900..5925).contains(&mhz) {
+                present[1] = true;
+            }
+        }
+    }
+    finish(present, he_ap, &mut result);
+    result
+}
+
+fn wifi_wireless_modes(chip: &Map<String, Value>, he: [Option<bool>; 2]) -> Vec<&'static str> {
+    if ["ChipIndex", "Channel", "BandWidth", "CountryCode"]
+        .iter()
+        .any(|key| {
+            chip.get(*key)
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+        })
+    {
+        return Vec::new();
+    }
+    let (index, legacy, ax) = match chip.get("Band").and_then(Value::as_str) {
+        Some("b") => (0, "4", "7"),
+        Some("a") => (1, "6", "8"),
+        _ => return Vec::new(),
+    };
+    let current = chip.get("WirelessMode").and_then(Value::as_str);
+    if !matches!(current, Some(mode) if mode == legacy || mode == ax) {
+        return Vec::new();
+    }
+    match he[index] {
+        Some(true) => vec![legacy, ax],
+        Some(false) if current == Some(legacy) => vec![legacy],
+        _ => Vec::new(),
+    }
 }
 
 /// Standard CN 5 GHz channel numbers accepted by the firmware (DFS ones
@@ -877,6 +943,15 @@ impl Ctl {
             .collect())
     }
 
+    /// On-demand driver capabilities; a failed probe grants no write capability.
+    async fn wifi_he_capabilities(&self) -> [Option<bool>; 2] {
+        let program = std::env::var("ZWRT_DATAD_IW_BIN").unwrap_or_else(|_| "iw".into());
+        match crate::command::run(&program, ["phy"], Duration::from_secs(2)).await {
+            Ok(output) => wifi_he_bands(&String::from_utf8_lossy(&output)),
+            Err(_) => [None; 2],
+        }
+    }
+
     /// The radio row from `queryWiFiChipAdvancedInfo` for one band.
     async fn wifi_chip_row(&self, band: &str) -> Option<Map<String, Value>> {
         let reply = self
@@ -951,15 +1026,29 @@ impl Ctl {
         // (0 = auto); the pinned channel lives in queryWiFiChipAdvancedInfo.
         // Merge it into the main sections so clients can display what is
         // actually configured rather than what the radio happens to run on.
+        let he = self.wifi_he_capabilities().await;
         for (band, section) in [("b", "main_2g"), ("a", "main_5g")] {
             if let Some(chip) = self.wifi_chip_row(band).await
-                && let Some(pinned) = chip
+                && let Some(target) = sections.get_mut(section)
+            {
+                if let Some(pinned) = chip
                     .get("Channel")
                     .and_then(Value::as_str)
                     .filter(|v| !v.is_empty())
-                && let Some(target) = sections.get_mut(section)
-            {
-                target["channel"] = json!(pinned);
+                {
+                    target["channel"] = json!(pinned);
+                }
+                if let Some(mode) = chip
+                    .get("WirelessMode")
+                    .and_then(Value::as_str)
+                    .filter(|v| !v.is_empty())
+                {
+                    target["wireless_mode"] = json!(mode);
+                }
+                let modes = wifi_wireless_modes(&chip, he);
+                if !modes.is_empty() {
+                    target["wireless_modes"] = json!(modes);
+                }
             }
         }
         if sections.is_empty() {
@@ -972,6 +1061,7 @@ impl Ctl {
     /// Unchanged fields are re-sent from the current row (the WebUI builder
     /// always submits the complete set); a no-op change performs no write.
     async fn wifi_configure(&self, params: &Value) -> Outcome {
+        let _guard = self.wifi_gate.lock().await;
         let section = match text(params, "section") {
             Some(section @ ("main_2g" | "main_5g" | "guest_2g" | "guest_5g")) => section,
             _ => return Outcome::Invalid("unsupported wifi section".into()),
@@ -1009,6 +1099,11 @@ impl Ctl {
                 "hidden" | "isolate" => matches!(value, "0" | "1"),
                 "pmf" => matches!(value, "0" | "1" | "2"),
                 "maxassoc" => value.parse::<u32>().is_ok_and(|n| (1..=128).contains(&n)),
+                "wireless_mode" => match section {
+                    "main_2g" => matches!(value, "4" | "7"),
+                    "main_5g" => matches!(value, "6" | "8"),
+                    _ => false,
+                },
                 // The channel belongs to the whole radio, so only the main
                 // sections may set it; a guest section would otherwise write
                 // the other band's channel list onto the wrong radio.
@@ -1058,6 +1153,7 @@ impl Ctl {
                 .to_owned()
         };
         let wanted_channel = wanted.remove("channel");
+        let wanted_mode = wanted.remove("wireless_mode");
         let mut target = WifiTarget {
             ssid: wanted
                 .remove("ssid")
@@ -1086,6 +1182,7 @@ impl Ctl {
                 .map(|v| if v { "1" } else { "0" }.to_owned())
                 .unwrap_or_else(|| current_text("AccessPointSwitchStatus")),
             channel: None,
+            wireless_mode: None,
         };
         // An open network carries no key; asking for "none" clears it.
         if target.encryption == "none" {
@@ -1103,6 +1200,20 @@ impl Ctl {
                 && text("AccessPointSwitchStatus") == target.enabled
         };
         let chip_row = self.wifi_chip_row(band).await;
+        // Validate the complete radio request before applying any AP fields.
+        // A guest AP or unknown hardware must never receive a guessed AX mode.
+        if let Some(mode) = wanted_mode.as_ref() {
+            let he = self.wifi_he_capabilities().await;
+            if !chip_row.as_ref().is_some_and(|chip| {
+                chip.get("ChipIndex").and_then(Value::as_str)
+                    == current.get("ChipIndex").and_then(Value::as_str)
+                    && wifi_wireless_modes(chip, he).contains(&mode.as_str())
+            }) {
+                return Outcome::Invalid(
+                    "Wi-Fi wireless_mode is not supported by this radio".into(),
+                );
+            }
+        }
         let chip_text = |key: &str| {
             chip_row
                 .as_ref()
@@ -1114,12 +1225,28 @@ impl Ctl {
         // The channel is a per-radio setting, written through the radio's
         // advanced-info goform (main_5g and main_2g; guest sections refuse it).
         let channel_target = wanted_channel.filter(|value| *value != chip_text("Channel"));
-        let channel_changed = channel_target.is_some();
+        let mode_target = wanted_mode.filter(|value| *value != chip_text("WirelessMode"));
+        let radio_changed = channel_target.is_some() || mode_target.is_some();
+        if radio_changed
+            && ([
+                "ChipIndex",
+                "WirelessMode",
+                "Channel",
+                "BandWidth",
+                "CountryCode",
+            ]
+            .iter()
+            .any(|key| chip_text(key).is_empty())
+                || chip_text("ChipIndex") != current_text("ChipIndex"))
+        {
+            return Outcome::Failed("OEM Wi-Fi radio configuration unavailable".into());
+        }
         let ap_changed = !row_matches(&current);
-        if !ap_changed && !channel_changed {
+        if !ap_changed && !radio_changed {
             return Outcome::Ok(json!({"section":section,"changed":false,"verified":true}));
         }
         target.channel = channel_target;
+        target.wireless_mode = mode_target;
         // The AP settings write only happens when they actually move; a
         // channel-only change skips straight to the radio write below.
         let mut form: Vec<(&str, String)> = Vec::new();
@@ -1182,7 +1309,7 @@ impl Ctl {
                 );
             }
         }
-        if let Some(channel) = target.channel.as_ref() {
+        if radio_changed {
             // The radio write re-sends the full advanced set from the current
             // row, exactly like the WebUI's builder. Without the row we would
             // be writing empty radio parameters — refuse instead.
@@ -1197,9 +1324,21 @@ impl Ctl {
             };
             let mut form: Vec<(&str, String)> = vec![
                 ("ChipIndex", radio_text("ChipIndex")),
-                ("WirelessMode", radio_text("WirelessMode")),
+                (
+                    "WirelessMode",
+                    target
+                        .wireless_mode
+                        .clone()
+                        .unwrap_or_else(|| radio_text("WirelessMode")),
+                ),
                 ("CountryCode", radio_text("CountryCode")),
-                ("Channel", channel.clone()),
+                (
+                    "Channel",
+                    target
+                        .channel
+                        .clone()
+                        .unwrap_or_else(|| radio_text("Channel")),
+                ),
                 ("BandWidth", radio_text("BandWidth")),
             ];
             if band == "a" && !radio_text("Band").is_empty() {
@@ -1210,7 +1349,7 @@ impl Ctl {
                 // that so the caller does not assume nothing changed.
                 if ap_changed {
                     return Outcome::Failed(format!(
-                        "AP settings were applied, but the channel write failed: {error}"
+                        "AP settings were applied, but the radio write failed: {error}"
                     ));
                 }
                 return Outcome::Failed(error);
@@ -1218,7 +1357,9 @@ impl Ctl {
             let verified = tokio::time::timeout(Duration::from_secs(30), async {
                 loop {
                     if let Some(row) = self.wifi_chip_row(band).await
-                        && row.get("Channel").and_then(Value::as_str) == Some(channel.as_str())
+                        && form.iter().all(|(key, expected)| {
+                            row.get(*key).and_then(Value::as_str) == Some(expected.as_str())
+                        })
                     {
                         return true;
                     }
@@ -1229,7 +1370,7 @@ impl Ctl {
             .unwrap_or(false);
             if !verified {
                 return Outcome::Failed(
-                    "Wi-Fi channel write was accepted but readback did not match".into(),
+                    "Wi-Fi radio write was accepted but readback did not match".into(),
                 );
             }
         }
@@ -2636,6 +2777,44 @@ impl Ctl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn he_capabilities_require_ap_support_on_the_right_band() {
+        let bands = "Wiphy phy25\n\tBand 1:\n\t\tHE Iftypes: Station\n\t\t\tHE PHY Capabilities: (0x02)\n\t\t\t* 2412 MHz [1]\n\tBand 2:\n\t\tHE Iftypes: Station AP\n\t\t\tHE PHY Capabilities: (0x0c)\n\t\t\t* 5180 MHz [36]\n\tBand 4:\n\t\tHE Iftypes: AP\n\t\t\tHE PHY Capabilities: (0xff)\n\t\t\t* 5955 MHz [1]\n";
+        assert_eq!(wifi_he_bands(bands), [Some(false), Some(true)]);
+        assert_eq!(wifi_he_bands(""), [None, None]);
+        assert_eq!(
+            wifi_he_bands(
+                "Wiphy phy0\nBand 2:\nHE Iftypes: AP\nHE PHY Capabilities: (0x01)\n* 5180 MHz [36] (disabled)"
+            ),
+            [None, None]
+        );
+        // Conflicting radios cannot authorize an unidentified older AP.
+        assert_eq!(
+            wifi_he_bands(&format!("{bands}\nWiphy phy26\nBand 2:\n* 5180 MHz [36]\n")),
+            [Some(false), Some(false)]
+        );
+    }
+
+    #[test]
+    fn wireless_modes_require_both_driver_and_oem_configuration() {
+        let mut chip = json!({"ChipIndex":"1","Band":"a","Channel":"36","CountryCode":"CN","BandWidth":"6","WirelessMode":"6"}).as_object().unwrap().clone();
+        assert_eq!(
+            wifi_wireless_modes(&chip, [None, Some(true)]),
+            vec!["6", "8"]
+        );
+        assert_eq!(
+            wifi_wireless_modes(&chip, [Some(true), Some(false)]),
+            vec!["6"]
+        );
+        assert!(wifi_wireless_modes(&chip, [Some(true), None]).is_empty());
+        chip.insert("WirelessMode".into(), json!("7"));
+        assert!(wifi_wireless_modes(&chip, [Some(true); 2]).is_empty());
+        chip.insert("Band".into(), json!("b"));
+        assert_eq!(wifi_wireless_modes(&chip, [Some(true); 2]), vec!["4", "7"]);
+        chip.remove("CountryCode");
+        assert!(wifi_wireless_modes(&chip, [Some(true); 2]).is_empty());
+    }
 
     #[test]
     fn mu5120_wall_clock_uses_oem_zone_without_double_offset() {

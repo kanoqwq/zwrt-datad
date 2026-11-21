@@ -432,13 +432,29 @@ U50 的 Wi-Fi 动作与主线（U60pro）同名同形：
 - `wifi.configure` 额外接受 **`channel`**（`main_5g` 与 `main_2g`）：`"0"` 恢复自动选信道，
   5G 为标准信道号（36–165），2.4G 为 1–13。写入走官方 `setWiFiChipAdvancedInfo`，重发当前无线模式/
   国家码/带宽仅改信道，回读校验。**DFS 信道（52–64、100–144）开台前有法规强制的
-  约 60 秒 CAC 静默**——自动模式挤到 DFS 信道就是 5G 开得慢的根源；钉死
-  36–48 或 149–165 等**非 DFS 信道**即可秒开。信道是整颗射频的设置，只在主段（`main_2g`/`main_5g`）暴露，访客段拒绝；
+  约 60 秒 CAC 静默**。在不覆盖 DFS 频段的带宽下，可选 36–48 或 149–165 等
+  **非 DFS 信道**避免 CAC；160 MHz 覆盖的子信道仍可能包含 DFS，主信道为 36 也不例外。
+  信道是整颗射频的设置，只在主段（`main_2g`/`main_5g`）暴露，访客段拒绝；
   `wifi.status` 的主段 `channel` 返回 `queryWiFiChipAdvancedInfo` 里的固定信道（`0` 表示自动）。
   `band.set_lte`/`band.set_nr_*` 传空列表（解锁）改为写入完整工厂频段表，因为 U50 Pro 固件的掩码 `0` 表示“不允许任何频段”。
 - `wifi.set_dual_band`：官方双频合一开关走 `switchWiFiModule` 携带当前开关与 LAN 标志，
   仅写 `wifi_lbd_enable`，回读校验；无变化 `changed:false`。
 - `wifi.set_module`：Wi-Fi 总开关（`switchWiFiModule` + `SwitchOption`），与主线动作名一致。
+
+`wifi.status` 的主段新增 `wireless_mode`（当前原厂模式）及按能力提供的只读
+`wireless_modes`（可写模式列表）。仅当 `iw phy` 明确上报该频段 AP 的 HE 能力、
+且原厂高级配置完整且模式编码已知时，才提供 Wi-Fi 6 选项：
+`main_2g` 为 `["4","7"]`（b/g/n、ax），`main_5g` 为 `["6","8"]`（a/n/ac、ax）。
+驱动查询失败、仅 Station 支持 HE、多个 PHY 能力不一致或原厂模式未知时，不授权 AX 写入。
+非 HE AP 可仅返回旧模式；旧设备/其他后端没有该字段时，客户端隐藏无线模式编辑器。
+
+`wifi.configure` 可按上报列表提交 `wireless_mode` 字符串，例如
+`{"section":"main_5g","wireless_mode":"8"}`。服务端写前重新检测能力，验证失败不会先修改 SSID；
+访客段拒收该字段。模式与信道可同次提交，复用原厂高级接口，保留国家码和带宽，
+无变化不写；写后对整组射频参数回读，固件仅返回成功但未应用时仍报失败，不自动重放。
+设置作用于该频段的所有 AP，应用时热点可能暂时断开。网页模式修改请求等待上限为 45 秒。
+`verified:true` 表示原厂配置回读一致，原厂异步重启和 DFS CAC 可能尚未结束；
+应等待热点恢复、重新连接后再进行下一次切换，不能把配置回读成功当作 AP 已重新开台。
 
 ### U50 邻区
 

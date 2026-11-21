@@ -191,11 +191,19 @@ function WifiBand({ api, section, current, moduleOn, refresh }) {
       hidden: String(current.hidden) === "1",
       maxassoc: String(current.maxassoc ?? ""),
       channel: String(current.channel || "0"),
+      wireless_mode: String(current.wireless_mode ?? ""),
     };
     setForm(f);
     setInitial(f);
   }, [current]);
   const dirty = !!form && changed(form, initial);
+  const modeLabels = five
+    ? { "6": "Wi-Fi 5 · 802.11 a/n/ac", "8": "Wi-Fi 6 · 802.11ax" }
+    : { "4": "Wi-Fi 4 · 802.11 b/g/n", "7": "Wi-Fi 6 · 802.11ax" };
+  const modeOptions = [...new Set(Array.isArray(current.wireless_modes) ? current.wireless_modes : [])]
+    .filter((value) => typeof value === "string" && modeLabels[value])
+    .map((value) => ({ value, label: modeLabels[value] }));
+  const hasModeChoice = modeOptions.length > 1 && modeOptions.some((option) => option.value === String(current.wireless_mode));
   useDirtyGuard(dirty);
   async function save(toggle) {
     await op.run(
@@ -226,6 +234,11 @@ function WifiBand({ api, section, current, moduleOn, refresh }) {
             channel: form.channel,
           };
           if (form.key) params.key = form.key;
+          if (form.wireless_mode !== String(current.wireless_mode ?? "")) {
+            if (!hasModeChoice || !modeOptions.some((option) => option.value === form.wireless_mode))
+              throw new Error("设备无线模式能力已变化，请刷新后重试");
+            params.wireless_mode = form.wireless_mode;
+          }
         }
         if (
           !(await ask({
@@ -236,7 +249,7 @@ function WifiBand({ api, section, current, moduleOn, refresh }) {
           }))
         )
           return null;
-        await api.control("wifi.configure", params);
+        await api.control("wifi.configure", params, { timeout: 45000 });
         const next = await api.control("wifi.status"),
           read = next[section];
         const verified =
@@ -247,7 +260,8 @@ function WifiBand({ api, section, current, moduleOn, refresh }) {
               canonical(read.encryption) === canonical(params.encryption) &&
               String(read.hidden) === params.hidden &&
               String(read.maxassoc) === params.maxassoc &&
-              String(read.channel || "0") === params.channel;
+              String(read.channel || "0") === params.channel &&
+              (params.wireless_mode === undefined || String(read.wireless_mode) === params.wireless_mode);
         if (verified) {
           const nextForm = { ...form, key: "" };
           setForm(nextForm);
@@ -300,6 +314,17 @@ function WifiBand({ api, section, current, moduleOn, refresh }) {
             onChange={(e) => void save(e.target.checked)}
           />
           {input("ssid", "SSID")}
+          {hasModeChoice && (
+            <Select
+              label="无线模式"
+              description="同时作用于该频段的主网络和访客网络"
+              data={modeOptions}
+              value={form.wireless_mode}
+              onChange={(value) => setForm((f) => ({ ...f, wireless_mode: value }))}
+              allowDeselect={false}
+              disabled={op.busy}
+            />
+          )}
           <Select
             label="安全模式"
             data={security}

@@ -81,6 +81,7 @@ LOG = []
 
 
 class Vendor(BaseHTTPRequestHandler):
+    skip_wireless_mode = False
     logged_in = False
     developer = False
     skip_mode_write = False
@@ -269,6 +270,8 @@ class Vendor(BaseHTTPRequestHandler):
             row = next(row for row in CHIP_ADVANCED["ResponseList"]
                        if row["ChipIndex"] == one.get("ChipIndex"))
             for key in ("Channel", "BandWidth", "WirelessMode", "CountryCode"):
+                if key == "WirelessMode" and Vendor.skip_wireless_mode:
+                    continue
                 if key in one:
                     row[key] = one[key]
         elif action == "setAccessPointInfo":
@@ -297,20 +300,20 @@ class Vendor(BaseHTTPRequestHandler):
         pass
 
 
-def call(port, path, body=None, headers=None):
+def call(port, path, body=None, headers=None, timeout=8):
     data = json.dumps(body).encode() if body is not None else None
     request = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data,
                                      headers={"Content-Type": "application/json", **(headers or {})})
     try:
-        with urllib.request.urlopen(request, timeout=8) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.status, json.load(response)
     except urllib.error.HTTPError as error:
         raw = error.read()
         return error.code, json.loads(raw) if raw else {}
 
 
-def control(port, action, params):
-    return call(port, "/control", {"action": action, "params": params})
+def control(port, action, params, timeout=8):
+    return call(port, "/control", {"action": action, "params": params}, timeout=timeout)
 
 
 def writes():
@@ -352,6 +355,11 @@ case "$1:$2" in
 esac
 ''')
     cfg.chmod(0o700)
+    iw_info = folder / "iw-info"
+    iw_info.write_text("")
+    iw = folder / "iw"
+    iw.write_text(f'#!/bin/sh\n[ "$1" = phy ] || exit 1\ncat "{iw_info}"\n')
+    iw.chmod(0o700)
     server = ThreadingHTTPServer(("127.0.0.1", 0), Vendor)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     with socket.socket() as probe:
@@ -372,6 +380,7 @@ esac
     cloud_file.chmod(0o600)
     url = f"http://127.0.0.1:{server.server_port}/goform/goform_get_cmd_process"
     env = {**os.environ, "ZWRT_DATAD_U50_CFG_BIN": str(cfg), "ZWRT_DATAD_OTA_DISABLE_AUTO": "1",
+           "ZWRT_DATAD_IW_BIN": str(iw),
            "ZWRT_DATAD_ACTIVITY_FLUSH_SECONDS": "3600"}
     process = subprocess.Popen(
         [BINARY, "--u50-model", "u50s", "--u50-goform-url", url, "--u50-data-dir", str(folder / "data"),
@@ -691,7 +700,7 @@ esac
         saved = control(port, "wifi.status", {})[1]["result"]["main_2g"]
         saved.pop("disabled")  # the mainline contract also rejects it on save
         status, result = control(port, "wifi.configure", {"section": "main_2g", **{
-            key: value for key, value in saved.items() if key != "writable"}})
+            key: value for key, value in saved.items() if key not in ("writable", "wireless_mode", "wireless_modes")}})
         assert status == 200 and result["result"] == {"section": "main_2g", "changed": False, "verified": True}, result
         assert len(writes()) == mark
         status, result = control(port, "wifi.configure", {
@@ -743,6 +752,47 @@ esac
         assert control(port, "wifi.configure", {"section": "main_5g", "channel": "0"})[0] == 200
         assert CHIP_ADVANCED["ResponseList"][1]["Channel"] == "0"
         assert control(port, "wifi.configure", {"section": "main_5g", "channel": "50"})[0] == 400
+        # A mode enum alone is insufficient: unavailable/station-only HE never
+        # authorizes AX, even if the request also contains valid AP changes.
+        mark = len(writes())
+        assert "wireless_modes" not in control(port, "wifi.status", {})[1]["result"]["main_5g"]
+        assert control(port, "wifi.configure", {"section": "main_5g", "ssid": "must-not-change", "wireless_mode": "8"})[0] == 400
+        assert len(writes()) == mark
+        iw_info.write_text('Wiphy phy0\n Band 2:\n  HE Iftypes: Station\n   HE PHY Capabilities: (0x01)\n  * 5180 MHz [36]\n')
+        assert control(port, "wifi.configure", {"section": "main_5g", "wireless_mode": "8"})[0] == 400
+        iw_info.write_text('Wiphy phy0\n Band 1:\n  HE Iftypes: Station AP\n   HE PHY Capabilities: (0x01)\n  * 2412 MHz [1]\n Band 2:\n  HE Iftypes: Station AP\n   HE PHY Capabilities: (0x0c)\n  * 5180 MHz [36]\n')
+        view = control(port, "wifi.status", {})[1]["result"]
+        assert view["main_2g"]["wireless_modes"] == ["4", "7"]
+        assert view["main_5g"]["wireless_modes"] == ["6", "8"]
+        assert view["main_5g"]["wireless_mode"] == "6"
+        assert "wireless_modes" not in view["guest_2g"]
+        for section, mode in [("main_2g", "8"), ("main_5g", "7"), ("guest_2g", "7"), ("guest_5g", "8")]:
+            assert control(port, "wifi.configure", {"section": section, "wireless_mode": mode})[0] == 400
+        assert len(writes()) == mark
+        for section, ax, legacy in [("main_5g", "8", "6"), ("main_2g", "7", "4")]:
+            old = dict(CHIP_ADVANCED["ResponseList"][int(section == "main_5g")])
+            mark = len(writes())
+            status, result = control(port, "wifi.configure", {"section": section, "wireless_mode": ax})
+            assert status == 200 and result["result"]["verified"], result
+            radio_writes = writes()[mark:]
+            assert len(radio_writes) == 1 and radio_writes[0][1] == "setWiFiChipAdvancedInfo", radio_writes
+            form = radio_writes[0][2]
+            assert form["WirelessMode"] == ax
+            assert all(form[k] == old[k] for k in ("ChipIndex", "Channel", "BandWidth", "CountryCode"))
+            assert control(port, "wifi.status", {})[1]["result"][section]["wireless_mode"] == ax
+            mark = len(writes())
+            assert control(port, "wifi.configure", {"section": section, "wireless_mode": ax})[0] == 200
+            assert len(writes()) == mark
+            assert control(port, "wifi.configure", {"section": section, "wireless_mode": legacy})[0] == 200
+        # OEM HTTP success is not enough; a write ignored by the firmware must
+        # fail readback and must not be replayed automatically.
+        Vendor.skip_wireless_mode = True
+        mark = len(writes())
+        status, result = control(port, "wifi.configure", {"section": "main_5g", "wireless_mode": "8"}, timeout=40)
+        assert status >= 400 and "readback" in json.dumps(result), result
+        assert len(writes()) == mark + 1
+        assert CHIP_ADVANCED["ResponseList"][1]["WirelessMode"] == "6"
+        Vendor.skip_wireless_mode = False
 
         # Band steering toggle rides the module-switch goform with the
         # current switch and LAN flags preserved.
