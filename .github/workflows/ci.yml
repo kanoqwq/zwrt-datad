@@ -50,6 +50,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y binutils-arm-linux-gnueabihf
       - run: sh tools/u50get/build.sh
       - run: python3 tests/u50pro_download_test.py
+      - run: python3 tests/deploy_kano_package_test.py
   u50pro-go-installer:
     runs-on: ubuntu-latest
     timeout-minutes: 10

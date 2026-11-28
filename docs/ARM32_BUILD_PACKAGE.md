@@ -1,210 +1,130 @@
-# ARM32 编译与 deploy_kano 打包流程
+# ARM32 编译与 deploy_kano 整包交付
 
-本文记录当前 U50 系列 ARM32 后端的本地编译、打包和交付流程。统一交付目录是 **`build/deploy_kano/`**。
+`deploy_kano` 是仓库支持的本地构建与打包方式。正式入口为
+[`scripts/build-deploy-kano.ps1`](../scripts/build-deploy-kano.ps1)，
+统一交付目录为 **`build/deploy_kano/`**；脚本和模板入库，编译产物与私人配置不入库。
 
-编译成功、打包成功、设备部署成功是三个独立状态。生成 candidate 不代表 `deploy_kano` 已更新；生成部署包也不代表设备已经更新。
+## Windows + WSL 一次构建
 
-## 1. 工作目录与产物归属
-
-本机源码仓库为 `D:\Git\zwrt-datad`，ARM32 基础分支为 `arm32`，Web 功能可在对应功能分支构建；WSL 对应路径为 `/mnt/d/Git/zwrt-datad`。
-从这份源码构建，不使用 WSL 家目录下可能残留的另一份 `~/zwrt-datad`。
-
-| 路径 | 用途 | 清理原则 |
-| --- | --- | --- |
-| `rust/`、`scripts/`、`tools/`、`tests/`、`docs/` | 源码、模板、测试、文档 | 保留，包括尚未提交及暂存的改动 |
-| `rust/target/` | Cargo 编译输出和缓存 | 可在无构建进程时删除，下次重新编译 |
-| `build/arm32-toolchain/` | ARM32 构建脚本生成的编译器包装脚本 | 可重新生成 |
-| `build/u50-diag-worker`、`build/u50-diag-streamer`、`build/efs-worker-armv7` | 嵌入主程序的辅助进程 | 构建中间产物，不单独作为整套更新交付 |
-| `build/zwrt-datad-armv7-candidate` | 本次编译出的主程序 | 打包输入，不是已更新的部署包 |
-| `build/rust-release-provenance-armv7.json` | candidate 的版本、提交号、目标和 SHA256 | 必须与 candidate 配套 |
-| **`build/deploy_kano/`** | **统一部署交付目录** | **更新时整套重新生成，不当作缓存清理** |
-| `build/u50pro-go-installer/` | Go 安装器的生成源码和内嵌资源 | 可重新生成 |
-| `build/reports/` | 构建、测试及核验日志 | 集中存放，避免在 `build/` 根目录堆日志 |
-| `build/sigcap/`、`build/sigweb*`、其他逆向参考目录 | 真实抓包和参考资料 | 不能按编译垃圾删除 |
-| `local/workspace-archive/` | 历史补丁、试验源码和清理记录 | 本地归档，不作为打包输入 |
-
-`build/`、`rust/target/`、`local/` 被 Git 忽略。不能用“未跟踪”作为判断文件是否可以删除的依据。
-
-## 2. 构建前检查
-
-在 Windows PowerShell 中进入仓库，确认分支和改动：
+在仓库根目录运行：
 
 ```powershell
-Set-Location D:\Git\zwrt-datad
-git branch --show-current
-git status --short
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-deploy-kano.ps1
 ```
 
-日常本地验证可以编译未提交的工作区，但必须知道本次包含哪些改动，不要覆盖其他人的暂存内容。
-`rust-release-provenance-armv7.json` 的 `commit` 仅记录 HEAD，**不记录未提交源码的完整状态**，不能据此声称候选包来自干净提交。
+默认编译带内嵌 Web 的 ARMv7 release，然后重新生成 shell 安装器、tiny
+bootstrap、六条分段命令、Go 安装器及 Windows 离线 ADB 包。全部核验成功后
+才替换 `build/deploy_kano/`。过程不连接设备、不安装、不上传、不发布 GitHub release。
 
-本机需要：
+依赖：
 
-- WSL Linux：Bash、Python 3、`file`、`shasum`、Rust/rustup，以及构建脚本指定的 **Rust 1.89.0**。
-- Linux Zig；本机使用 `/home/kano/zig/zig`，不是 Windows `zig.exe`。
-- Windows Python 3，用于现有本地整包刷新入口。
-- WSL Go 1.25+、公共 CA 证书包；生成压缩 Go 安装器时还需要 UPX。
-- Android SDK platform-tools。现有本地刷新入口使用 `D:\Android\Sdk\platform-tools`，ADB 包会复制其中的 ADB、DLL 和 NOTICE 文件。
-- tiny 下载器，以及当前本地部署目录的地址配置，见第 4 节。
+- Windows：PowerShell、Node.js/npm（满足 `web/package.json`）、Windows Android platform-tools。
+- WSL Linux：Python 3、Bash、Rust/rustup 1.89.0、Linux Zig、Go 1.25+、UPX、
+  `binutils-arm-linux-gnueabihf`、`file`、`sha256sum` 和公共 CA 证书包。
+- Rust ARM 目标由构建脚本安装：`armv7-unknown-linux-musleabihf`。
 
-## 3. 编译 ARM32 后端
-
-纯 API 使用 [build-arm32-candidate.sh](../scripts/build-arm32-candidate.sh)。当前带 Web 的部署包按下一小节构建；普通主机 `cargo build` 的产物不能用于 ARM32 部署。
-
-PowerShell：
+默认从 PATH 查找 `adb.exe`，Zig 优先取 WSL PATH，否则使用 Linux 用户的
+`~/zig/zig`。也可以显式传入：
 
 ```powershell
-Set-Location D:\Git\zwrt-datad
-New-Item -ItemType Directory -Force build/reports | Out-Null
-wsl bash -lc 'cd /mnt/d/Git/zwrt-datad && ZIG=/home/kano/zig/zig bash scripts/build-arm32-candidate.sh > build/reports/arm32-build.log 2>&1'
-if ($LASTEXITCODE -ne 0) { throw 'ARM32 build failed; inspect build/reports/arm32-build.log' }
-Get-Content build/reports/arm32-build.log -Tail 12
+powershell -File scripts/build-deploy-kano.ps1 `
+  -AdbDir 'C:\Android\platform-tools' `
+  -Zig '/opt/zig/zig' `
+  -BaseUrl 'https://YOUR-SERVER/datad/u50pro'
 ```
 
-脚本依次执行：
+可将私人配置保存到 **`local/deploy-kano.json`**，该目录被 Git 忽略：
 
-1. 生成 ARM32 编译器包装脚本。
-2. 编译 DIAG worker、信令 streamer 和 EFS worker，并通过环境变量供 `rust/build.rs` 嵌入主程序。
-3. 用 Rust 1.89.0 构建 `armv7-unknown-linux-musleabihf` release 主程序。
-4. 检查主程序为 **ELF32 ARM、静态链接、已 strip**。
-5. 生成 candidate 和配套构建信息。
+```json
+{
+  "base_url": "https://YOUR-SERVER/datad/u50pro",
+  "adb_dir": "C:\\Android\\platform-tools",
+  "zig": "/opt/zig/zig"
+}
+```
 
-主程序为静态二进制，EFS worker 是依赖设备厂商库的独立动态进程；两者的链接方式不同是正常的。
+命令行参数优先于该文件；`-ConfigFile` 可指定其他本地配置。
+没有服务器目录时，安装命令要求使用者先设置 `DATAD_BASE_URL`，不会嵌入私人地址。
+下载支持 HTTP 和 HTTPS；不要在 URL 中放账号、密码或临时令牌。
 
-版本以根目录 [version.json](../version.json) 的 `datad.version` 为准。修改版本后必须重新编译再打包，不能只修改安装脚本中的版本或哈希。
+## 只打包、纯 API 与 Linux 构建
 
-### 带内嵌 Web 的版本（当前交付）
+已有 candidate 时，可以跳过主程序编译：
 
 ```powershell
+powershell -File scripts/build-deploy-kano.ps1 -PackageOnly
+```
+
+该选项只核验现有二进制、版本及 provenance 的一致性，**不会核对它是否包含
+最新源码改动**。源码修改后应完整构建。默认拒绝误打包纯 API candidate；
+只有明确传入 `-ApiOnly` 才构建/打包不含 Web 的版本。
+
+Linux/WSL 也可直接使用同一组仓库脚本（`--adb-dir` 指向 Windows platform-tools）：
+
+```sh
 npm ci --prefix web
 npm run build --prefix web
-wsl bash -lc 'cd /mnt/d/Git/zwrt-datad && ZIG=~/zig/zig bash scripts/build-arm32-web.sh --candidate > build/reports/arm32-web-build.log 2>&1'
-if ($LASTEXITCODE -ne 0) { throw 'Web-enabled ARM32 build failed' }
-python build/refresh-deploy-package.py --require-web
-if ($LASTEXITCODE -ne 0) { throw 'Packaging failed; do not upload' }
+ZIG=/opt/zig/zig bash scripts/build-arm32-web.sh --candidate
+sh tools/u50get/build.sh
+python3 scripts/package-deploy-kano.py \
+  --adb-dir /mnt/c/Android/platform-tools \
+  --base-url https://YOUR-SERVER/datad/u50pro
 ```
 
-`--candidate` 同步 Web 二进制及配套 provenance，包含 `features: ["web-ui"]`、资源摘要、大小与 `source_dirty`。不带该参数只生成独立的 `build/web-ui/armv7/` 产物。当前本机刷新入口的 `--require-web` 在打包前检查 feature 标记，避免误用纯 API candidate。
+最底层仍是 [`build-arm32-web.sh`](../scripts/build-arm32-web.sh)、
+[`build-arm32-candidate.sh`](../scripts/build-arm32-candidate.sh)、
+[`package-u50pro.py`](../scripts/package-u50pro.py)、
+[`package-u50pro-adb.py`](../scripts/package-u50pro-adb.py) 和
+[`package-u50pro-go.py`](../scripts/package-u50pro-go.py)。单独执行一个基础打包脚本
+不等于完整更新全部交付文件；整包入口负责同步、交叉核验和最终替换。
 
-网页安装后默认可访问 `http://设备IP:9461/ui/`，原 API 路径继续可用；通过服务参数 `--disable-web-ui` 禁用网页。打包后核对 `package-verification.json`，整套上传二进制、安装脚本及对应安装器/引导文件。
-
-## 4. 整套刷新 deploy_kano
-
-### 当前本机统一入口
-
-当前已有本地辅助脚本：
-
-```powershell
-Set-Location D:\Git\zwrt-datad
-python build/refresh-deploy-package.py
-if ($LASTEXITCODE -ne 0) { throw 'Packaging failed; do not upload this package' }
-```
-
-**该辅助脚本位于被 Git 忽略的 `build/` 中，目前不是仓库跟踪的正式脚本。**
-它在本机保留，但全新 clone 不会自带；清理时不能把它当普通日志删除。本文记录现状，没有把它描述成已有的通用 CI 入口。
-
-运行前确认以下本地文件存在：
-
-- `build/refresh-deploy-package.py`
-- `build/deploy_kano/u50get/tiny/u50get-tiny`
-- `build/deploy_kano/tiny-bootstrap/install-steps.txt`
-- 第 3 节生成的 candidate 和 provenance 文件。
-
-刷新入口从已有 `tiny-bootstrap/install-steps.txt` 中读取部署服务器目录，并使用现有 tiny 下载器。
-私人服务器地址只保留在本地生成物中，不写入公共仓库文档或模板。
-
-该入口会：
-
-1. 调用 [package-u50pro.py](../scripts/package-u50pro.py)，更新根部署包与 `tiny-bootstrap/` 中的二进制、安装脚本、bootstrap、校验文件。
-2. 重新生成分段安装命令。当前格式是 **6 条命令：准备 1 条、压缩载荷 4 段、校验执行 1 条**；命令文件内容为英文，每条长度小于 2000 字符。
-3. 检查生成的 shell 安装脚本语法。
-4. 调用 [package-u50pro-adb.py](../scripts/package-u50pro-adb.py)，生成离线 ADB 目录和当前版本 ZIP。
-5. 调用 [package-u50pro-go.py](../scripts/package-u50pro-go.py)，重新编译内嵌新版本哈希的 Go 安装器，包括 UPX 版和未压缩备用版。
-6. 核对各份二进制、脚本、bootstrap、Go 生成资源、校验清单和 ADB ZIP，输出 `package-verification.json`。
-
-刷新不是原子操作；中途失败时，目录里可能混有新旧文件。必须修复错误并完整重跑成功，不能从失败的半成品中挑文件上传。
-
-### 仓库内的基础打包脚本
-
-以下是当前入口调用的基础能力，便于迁移环境时核对。示例服务器地址必须替换，不包含私人配置。
-
-WSL 中生成 shell 安装包和 tiny bootstrap：
-
-```sh
-cd /mnt/d/Git/zwrt-datad
-python3 scripts/package-u50pro.py \
-  --output build/deploy_kano \
-  --base-url https://YOUR-SERVER/datad/u50pro \
-  --tiny-downloader build/deploy_kano/u50get/tiny/u50get-tiny
-```
-
-PowerShell 中生成离线 ADB 包：
-
-```powershell
-python scripts/package-u50pro-adb.py --output build/deploy_kano --adb-dir D:\Android\Sdk\platform-tools
-```
-
-WSL 中生成 Go 安装器：
-
-```sh
-cd /mnt/d/Git/zwrt-datad
-python3 scripts/package-u50pro-go.py \
-  --output build/deploy_kano \
-  --base-url https://YOUR-SERVER/datad/u50pro \
-  --ca-bundle /etc/ssl/certs/ca-certificates.crt --upx
-```
-
-这三条基础命令**不等于整包刷新**：它们本身不会完成本地辅助脚本中的分段命令生成、第二份 `tiny-bootstrap/` 同步和整包交叉核验。
-
-## 5. 最终交付文件
-
-统一从 `build/deploy_kano/` 取文件：
+## 输出与校验
 
 | 文件或目录 | 用途 |
 | --- | --- |
-| `zwrt-datad-armv7` | 上传服务器的 datad 主程序 |
-| `install-datad.sh` | shell 安装入口，内嵌该主程序的版本、大小和 SHA256 |
-| `bootstrap-u50pro.sh` | 内嵌 tiny 下载器，并固定校验安装脚本 |
-| `install-steps.txt`、`一键安装命令.txt` | 同一套分段粘贴命令，固定校验 bootstrap |
-| `install-datad-armv7` | Go 安装器，内嵌主程序版本、大小、SHA256 和部署脚本 |
-| `install-datad-armv7.unpacked` | 未压缩的 Go 安装器备用版 |
-| `U50Pro_ADB/`、`U50Pro_ADB_<版本>.zip` | 无网络的本地 ADB 部署包 |
-| `tiny-bootstrap/` | tiny 部署方案的同步副本 |
+| `zwrt-datad-armv7`、`install-datad.sh` | 必须配套上传的主程序和安装脚本 |
+| `bootstrap-u50pro.sh` | 内嵌 tiny 下载器，固定校验当前安装脚本 |
+| `install-steps.txt`、`一键安装命令.txt` | 六条英文命令：准备、四段载荷、校验执行；单条少于 2000 字符 |
+| `install-datad-armv7`、`.unpacked` 备用版 | 内嵌当前哈希的 Go 安装器，UPX 压缩版及未压缩版 |
+| `U50Pro_ADB/`、`U50Pro_ADB_<版本>.zip` | Windows 离线 ADB 安装包 |
+| `LATEST_ADB_PACKAGE.txt` | 指向本轮生成的 ZIP，不沿用旧的带日期包名 |
+| `tiny-bootstrap/` | tiny 方案的同步交付副本 |
 | `SHA256SUMS`、`INSTALLER-SHA256SUMS` | 文件校验清单 |
-| `build-info.json`、`installer-build-info.json` | 主程序和安装器的构建信息 |
-| `package-verification.json` | 本次整包交叉核验结果 |
+| `build-info.json`、`installer-build-info.json` | 构建信息与安装器资源信息 |
+| `package-verification.json` | 整套交付核验成功的记录 |
 
-旧版本 ZIP 可能仍在目录内；交付前按当前版本确认，不凭文件列表里的排列顺序选择。
+打包先在同一 `build/` 下的临时目录完成。它会核对：主程序副本、版本/大小/
+SHA256、完整安装脚本、bootstrap、四段载荷还原、校验清单、Go 生成资源和
+ADB ZIP 内的二进制。失败时保留此前的部署包，不发布半套新文件。
+输出目录由打包工具管理，只存放生成文件；私人配置、手写源码和抓包应放 `local/`。
 
-## 6. 上传前核验
+`version.json` 是版本来源，不能通过手改安装器 SHA256 绕过不匹配。
+provenance 的 `commit` 指向 HEAD，`source_dirty` 表明工作区是否含未提交改动；
+它不代表未提交源码的完整内容快照。SHA256 也不等于 Ed25519 发布签名。
+签名更新/公开发布另见 [`publish-arm32-release.sh`](../scripts/publish-arm32-release.sh)。
 
-至少确认：
+## 清理工作区
 
-- 构建、打包命令均以退出码 0 完成；本次相关测试通过。
-- `package-verification.json` 是本次成功生成的，不是之前遗留的文件。
-- candidate、部署目录主程序、tiny 副本和 ADB payload/ZIP 内主程序 SHA256 一致。
-- 安装脚本内的 SHA256、字节数与主程序一致；bootstrap 对应本次安装脚本；分段命令对应本次 bootstrap。
-- Go 安装器已重新编译，不能只替换旁边的 datad 二进制。
-- 各校验清单通过，版本与 `version.json` 一致。
-
-本机可快速查看：
+先预览，确认没有编译任务运行后再清理：
 
 ```powershell
-Get-Content build/deploy_kano/package-verification.json
-Get-FileHash build/zwrt-datad-armv7-candidate, build/deploy_kano/zwrt-datad-armv7 -Algorithm SHA256
+powershell -File scripts/clean-build.ps1 -CargoCache
+powershell -File scripts/clean-build.ps1 -CargoCache -Apply
 ```
 
-SHA256 用于确认文件匹配，**不等于 Ed25519 发布签名**。当前自建部署包流程不会自动生成 App 签名更新所需的清单签名。
-GitHub ARM32 发布及签名更新另见 [publish-arm32-release.sh](../scripts/publish-arm32-release.sh)；不在日常本地打包时顺带发布或签名。
+只删除列明的可重建中间产物；`-CargoCache` 包含 `rust/target/`，删除后下次
+Cargo 构建需要重新编译。始终保留最新 `build/deploy_kano/`、candidate/provenance、
+Web 构建结果、真实抓包和参考资料。脚本拒绝顶层目录链接和活动编译进程；
+遇到树内符号链接只删除链接本身，不遍历其目标。
 
-## 7. 上传与实机验证顺序
+历史手写辅助脚本、原始下载器资料保存在忽略的 `local/workspace-archive/`；
+不把它们作为正式打包依赖。旧的 `build/refresh-*-deploy-package.py` 不再是构建入口。
 
-1. 完成本机测试、ARM32 编译和整包核验。
-2. 将同一套 `zwrt-datad-armv7` 和 `install-datad.sh` 上传到同一个服务器目录；对外提供的 bootstrap 和 Go 安装器也同步更新。
-3. 所有文件就绪后再发送新版分段命令；上传过程中不通知用户开始安装。
-4. 在目标设备部署，等待明确的成功结果，确认运行版本和对应接口能力。
-5. 后端部署成功后，再连接 App 验证新功能，不能拿未更新的后端判断 App 功能是否正常。
+## 上传与验证
 
-EFS 的实机验证只读目录、读取文件；写入、删除和异常情况先由模拟测试验证，不拿用户基带文件做写入试验。
+1. 相关测试通过，构建与整包核验均成功。
+2. 将同一套主程序、安装脚本、bootstrap 和 Go 安装器上传完成后，再分发对应安装命令。
+3. 实机部署必须等待明确的 `SUCCESS`，再检查运行版本、接口和客户端。
 
-**禁止混用旧安装器与新二进制，也不要手改 SHA256 绕过不匹配。遇到校验错误应重新核对并生成整套部署包。**
+网页默认通过 `http://设备IP:9461/ui/` 访问，原 API 路径继续使用。
+`--disable-web-ui` 才禁用网页。编译成功、打包成功和设备部署成功是三个独立状态。
