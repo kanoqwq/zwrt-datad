@@ -1,0 +1,77 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import {decodeNas,decodeEps} from '../web/nas.js';
+import {emptyQos,registeredNetwork,updateQos,dataSession} from '../web/qos.js';
+import {createCards,applyCards,registerCardsNetwork} from '../web/signal-cards.js';
+import {SignalSummaryStore} from '../web/signal-cache.js';
+const fixture=JSON.parse(readFileSync(new URL('./fixtures/nas-qos.json',import.meta.url)));
+const hex=s=>Uint8Array.from(s.match(/../g),b=>parseInt(b,16));
+const accept=(dnn=true,pti=1)=>{const b=hex(dnn?fixture.accept:fixture.accept.replace(/250908696e7465726e6574$/,''));b[2]=pti;return decodeNas(b);};
+const request={type:'5GSM',name:'PDU_SESSION_ESTABLISHMENT_REQUEST',pduSessionId:1,pti:1,dnn:'internet'};
+test('confirmed internet survives device-state polls and IMS; release clears it',()=>{
+ let q=updateQos(registeredNetwork(emptyQos(),'LTE'),accept(),1);
+ for(const mode of ['LTE','SA','ENDC','LTE','NSA'])q=registeredNetwork(q,mode);
+ q=updateQos(q,{...accept(),pduSessionId:2,dnn:'ims',qosFlows:[{qfi:5,qi:5}]},2);
+ assert.equal(q.selected,'NR:1');assert.deepEqual(dataSession(q).ambr,fixture.expected.ambr);
+ q=updateQos(q,{type:'5GSM',name:'DL_NAS_TRANSPORT → PDU_SESSION_RELEASE_COMMAND',pduSessionId:1},3);
+ assert.equal(dataSession(q),null);
+});
+test('wire N1 transport request and accept correlate DNN without changing names',()=>{
+ const req=decodeNas(hex('7e00670100062e0101c1ffff1201250908696e7465726e6574'));
+ assert.equal(req.dnn,'internet');assert.equal(req.name,'UL_NAS_TRANSPORT → PDU_SESSION_ESTABLISHMENT_REQUEST');
+ const raw=hex(fixture.accept.replace(/250908696e7465726e6574$/,''));raw[2]=1;
+ const resp=decodeNas(Uint8Array.of(0x7e,0,0x68,1,0,raw.length,...raw));
+ let c=registerCardsNetwork(createCards(),'LTE');
+ for(const [ts,nas]of [[1,req],[2,resp]])c=applyCards(c,0xb80a,{diag_valid:true,ts,nas});
+ for(let i=0;i<5;i++)c=registerCardsNetwork(c,'LTE');
+ assert.equal(c.qosApn,'internet');assert.equal(c.qci,'9');assert.deepEqual(c.ambr,fixture.expected.ambr);
+ assert.match(c.ambrName,/DL_NAS_TRANSPORT →/);
+ assert.equal(decodeNas(hex('7e00670100062e0101c1ffff1202250908696e7465726e6574')).dnn,null);
+ assert.equal(decodeNas(hex('7e006701ffff2e0101c1ffff')),null);
+});
+test('duplicates preserve DNN; new PTI, IMS, expired request or release cannot reuse it',()=>{
+ const full={...accept(),mappedEpsBearers:[]},missing={...accept(false),mappedEpsBearers:[]};
+ const q=updateQos(updateQos(emptyQos(),full,1),missing,2);
+ assert.equal(dataSession(q).apn,'internet');assert.deepEqual(dataSession(q).ambr,fixture.expected.ambr);
+ assert.equal(dataSession(updateQos(q,{...missing,pti:2},3)),null);
+ assert.equal(dataSession(updateQos(updateQos(emptyQos(),request,1),missing,300001)),null);
+ assert.equal(dataSession(updateQos(updateQos(emptyQos(),{...request,pti:2},1),missing,2)),null);
+ assert.equal(dataSession(updateQos(updateQos(emptyQos(),{...request,dnn:'ims'},1),missing,2)),null);
+ const released=updateQos(q,{type:'5GSM',name:'PDU_SESSION_RELEASE_COMMAND',pduSessionId:1},3);
+ assert.equal(dataSession(updateQos(released,missing,4)),null);
+});
+test('NAS registration confirms real domain changes while radio hints never turn NSA into 5GS',()=>{
+ let q=updateQos(emptyQos(),accept(),1);
+ q=updateQos(q,{type:'EMM',name:'LTE TAU Accept'},2);assert.equal(dataSession(q),null);
+ q=updateQos(q,{type:'ESM',name:'LTE Activate Default EPS Bearer',epsBearerId:5,pti:2,dnn:'internet',qci:8,ambr:{dl:'300Mbps',ul:'50Mbps'}},3);
+ q=registeredNetwork(q,'SA');assert.equal(q.selected,'LTE:5');
+});
+test('late mapped EPS identity supplements NR without replacing its rates or reviving a deleted mapping',()=>{
+ const eps=decodeEps(hex('5200c101090908696e7465726e65740501c00002015e04fefec56c270d80001f09012042070150010109')).nas;
+ const modification=decodeNas(hex('2e0100cb2a060603e80600c875000c500009c10406fefeeede0300'));
+ let q=updateQos(registeredNetwork(emptyQos(),'SA',true),modification,1);
+ q=updateQos(q,eps,2);
+ assert.equal(q.selected,'NR:1');assert.deepEqual(dataSession(q).ambr,fixture.expected.ambr);
+ assert.equal(dataSession(q).qiLabel,'5QI');
+ let deleted=updateQos(registeredNetwork(emptyQos(),'SA',true),modification,1);
+ deleted=updateQos(deleted,{...modification,mappedEpsBearers:[{id:5,operation:2}]},2);
+ deleted=updateQos(deleted,eps,3);assert.equal(dataSession(deleted),null);
+ let handover=updateQos(registeredNetwork(emptyQos(),'LTE'),eps,1);
+ handover=registeredNetwork(updateQos(handover,modification,2),'LTE');
+ assert.equal(handover.selected,'NR:1');assert.deepEqual(dataSession(handover).ambr,fixture.expected.ambr);
+ handover=updateQos(handover,{...eps,name:'LTE Modify EPS Bearer'},3);
+ assert.equal(handover.selected,'NR:1');assert.deepEqual(dataSession(handover).ambr,fixture.expected.ambr);
+});
+test('live confirmed summary survives lagging RAT/mode polls but not SIM changes or disk reload',()=>{
+ const saved=new Map();globalThis.localStorage={getItem:k=>saved.get(k)||null,setItem:(k,v)=>saved.set(k,v),removeItem:k=>saved.delete(k)};
+ const state={system:{imei:'fixture'},sim:{iccid:'sim-a'},net:{type:'SA',net_select:'Only_5G'}};
+ const cache=new SignalSummaryStore('qos-fixture');cache.attach(state);
+ cache.publish(createCards({radio:'NR',updatedAt:100,bearerQos:updateQos(emptyQos(),accept(),1)}));
+ cache.observe({...state,net:{type:'LTE',net_select:'AUTO'}});
+ assert.equal(cache.current.qci,'9');assert.equal(cache.current.qosConfirmed,true);
+ const reload=new SignalSummaryStore('qos-fixture');reload.attach({...state,net:{type:'LTE',net_select:'AUTO'}});
+ assert.equal(reload.current.qci,null);assert.equal(reload.current.qosConfirmed,false);
+ cache.observe({...state,sim:{iccid:'sim-b'}});assert.equal(cache.current,null);
+ delete globalThis.localStorage;
+});

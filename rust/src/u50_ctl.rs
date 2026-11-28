@@ -180,6 +180,10 @@ pub const CONTROLS: &[&str] = &[
     "wifi.set_module",
     "wifi.set_dual_band",
     "wifi.configure",
+    "device.options.status",
+    "sleep.set",
+    "power.low_current.set",
+    "nfc.set",
     // Daemon-local signaling supervision (not OEM-backed).
     "signal.stream.start",
     "signal.stream.stop",
@@ -190,6 +194,7 @@ pub const READ_ACTIONS: &[&str] = &[
     "oem.access.status",
     "wifi.status",
     "wifi.dual_band_status",
+    "device.options.status",
     "apn.list",
     "client.access",
     "neighbor.list",
@@ -1416,6 +1421,164 @@ impl Ctl {
         Outcome::Ok(json!({"enabled":enabled,"changed":true,"verified":verified}))
     }
 
+    async fn device_options_status(&self) -> Result<Value, String> {
+        let raw = self
+            .read("sysIdleTimeToSleep,mc_low_current_mode,web_wifi_nfc_switch,web_wifi_nfc_flag,current_upgrade_state")
+            .await?;
+        let sleep_raw = raw.get("sysIdleTimeToSleep").and_then(Value::as_str);
+        let (wifi_sleep_valid, wifi_sleep_seconds) = match sleep_raw {
+            Some("-1") => (true, -1_i64),
+            Some("5") => (true, 300),
+            Some("10") => (true, 600),
+            Some("20") => (true, 1200),
+            Some("30") => (true, 1800),
+            Some("60") => (true, 3600),
+            Some("120") => (true, 7200),
+            _ => (false, -2),
+        };
+        let (low_current_supported, low_current_valid, low_current) =
+            match raw.get("mc_low_current_mode").and_then(Value::as_str) {
+                Some("" | "0") => (true, true, 0_i64),
+                Some("1") => (true, true, 1_i64),
+                _ => (false, false, -1_i64),
+            };
+        let (nfc_valid, nfc_enabled) =
+            match raw.get("web_wifi_nfc_switch").and_then(Value::as_str) {
+                Some("" | "0") => (true, 0_i64),
+                Some("1") => (true, 1_i64),
+                _ => (false, -1_i64),
+            };
+        let nfc_flag = match raw.get("web_wifi_nfc_flag").and_then(Value::as_str) {
+            Some("2") => 2_i64,
+            Some("3") => 3_i64,
+            _ => 1_i64,
+        };
+        let fota_str = raw
+            .get("current_upgrade_state")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        let fota_status_valid = !fota_str.is_empty() && fota_str.len() <= 63;
+        Ok(json!({
+            "wifi_sleep_valid": wifi_sleep_valid,
+            "wifi_sleep_seconds": wifi_sleep_seconds,
+            "low_current_supported": low_current_supported,
+            "low_current_valid": low_current_valid,
+            "low_current": low_current,
+            "nfc_valid": nfc_valid,
+            "nfc_enabled": nfc_enabled,
+            "nfc_flag": nfc_flag,
+            "fota_status_valid": fota_status_valid,
+            "fota_status": if fota_status_valid { fota_str } else { "Unknown" }
+        }))
+    }
+
+    async fn sleep_set(&self, params: &Value) -> Outcome {
+        let seconds = match integer(params, "seconds") {
+            Ok(Some(v @ (-1 | 300 | 600 | 1200 | 1800 | 3600 | 7200))) => v,
+            _ => return Outcome::Invalid("seconds must be -1, 300, 600, 1200, 1800, 3600, or 7200".into()),
+        };
+        let minutes = if seconds == -1 { -1 } else { seconds / 60 };
+        let pre = match self.read("wifi_onoff_state,WscModeOption").await {
+            Ok(v) => v,
+            Err(error) => return Outcome::Failed(error),
+        };
+        if pre.get("wifi_onoff_state").and_then(Value::as_str) != Some("1")
+            || pre.get("WscModeOption").and_then(Value::as_str) != Some("0")
+        {
+            return Outcome::Failed("WiFi idle sleep requires WiFi enabled and WPS idle".into());
+        }
+        let target = minutes.to_string();
+        if let Err(error) = self
+            .write("SET_WIFI_SLEEP_INFO", &[("sysIdleTimeToSleep", target.clone())])
+            .await
+        {
+            return Outcome::Failed(error);
+        }
+        let verified = self
+            .wait_field("sysIdleTimeToSleep", |value| value == target)
+            .await;
+        Outcome::Ok(json!({"seconds": seconds, "verified": verified}))
+    }
+
+    async fn low_current_set(&self, params: &Value) -> Outcome {
+        let enabled = match integer(params, "enabled") {
+            Ok(Some(v @ (0 | 1))) => v,
+            _ => return Outcome::Invalid("enabled must be 0 or 1".into()),
+        };
+        let target = if enabled == 1 { "1" } else { "0" };
+        if let Err(error) = self
+            .write(
+                "LOW_CURRENT_MODE_SWITCH",
+                &[("mc_low_current_mode", target.to_owned())],
+            )
+            .await
+        {
+            return Outcome::Failed(error);
+        }
+        let verified = self
+            .wait_field("mc_low_current_mode", |value| {
+                value == target || (enabled == 0 && value.is_empty())
+            })
+            .await;
+        Outcome::Ok(json!({"enabled": enabled, "verified": verified}))
+    }
+
+    async fn nfc_set(&self, params: &Value) -> Outcome {
+        let enabled = match integer(params, "enabled") {
+            Ok(Some(v @ (0 | 1))) => v,
+            _ => return Outcome::Invalid("enabled must be 0 or 1".into()),
+        };
+        let requested_flag = match integer(params, "flag") {
+            Ok(Some(v @ (1 | 2 | 3))) => Some(v),
+            Ok(None) => None,
+            _ => return Outcome::Invalid("flag must be 1, 2, or 3".into()),
+        };
+        let flag = match requested_flag {
+            Some(v) => v,
+            None => match self.field("web_wifi_nfc_flag").await.as_deref() {
+                Some("2") => 2,
+                Some("3") => 3,
+                _ => 1,
+            },
+        };
+        let sw_target = if enabled == 1 { "1" } else { "0" };
+        let fl_target = flag.to_string();
+        if let Err(error) = self
+            .write(
+                "WIFI_NFC_SET",
+                &[
+                    ("web_wifi_nfc_switch", sw_target.to_owned()),
+                    ("web_wifi_nfc_flag", fl_target.clone()),
+                ],
+            )
+            .await
+        {
+            return Outcome::Failed(error);
+        }
+        let verified = tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                if let Ok(after) = self.read("web_wifi_nfc_switch,web_wifi_nfc_flag").await {
+                    let sw_ok = match after.get("web_wifi_nfc_switch").and_then(Value::as_str) {
+                        Some(v) => v == sw_target || (enabled == 0 && v.is_empty()),
+                        None => false,
+                    };
+                    let fl_ok = match after.get("web_wifi_nfc_flag").and_then(Value::as_str) {
+                        Some(v) => v == fl_target || (flag == 1 && v.is_empty()),
+                        None => false,
+                    };
+                    if sw_ok && fl_ok {
+                        return true;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        })
+        .await
+        .unwrap_or(false);
+        Outcome::Ok(json!({"enabled": enabled, "flag": flag, "verified": verified}))
+    }
+
     /// OEM APN records contain username/password fields. Fetch a bounded
     /// catalog in batches allowed by the bridge, then discard those secrets
     /// while mapping onto the NMS's reviewed profile fields.
@@ -1552,6 +1715,7 @@ impl Ctl {
                     "WiFiDualBandSupported":"1","WiFiDualBandEnabled":if enabled {"1"} else {"0"},
                     "BandSteeringSwitch":if enabled {"1"} else {"0"}}))
             }),
+            "device.options.status" => self.device_options_status().await,
             "neighbor.list" => self.neighbor_list().await,
             "apn.list" => self.apn_panel_config().await.map(|config| {
                 let profiles = |key: &str| {
@@ -1772,6 +1936,9 @@ impl Ctl {
             "wifi.set_module" => self.wifi_set_module(params).await,
             "wifi.set_dual_band" => self.wifi_set_dual_band(params).await,
             "wifi.configure" => self.wifi_configure(params).await,
+            "sleep.set" => self.sleep_set(params).await,
+            "power.low_current.set" => self.low_current_set(params).await,
+            "nfc.set" => self.nfc_set(params).await,
             "neighbor.set" => match params.get("enabled").and_then(Value::as_bool) {
                 Some(enabled) => self.neighbor_set(enabled).await,
                 None => Outcome::Invalid("enabled must be boolean".into()),

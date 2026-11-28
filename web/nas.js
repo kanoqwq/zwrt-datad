@@ -176,9 +176,28 @@ function registration(d, start) {
   }
   return null;
 }
-export const decodeNas = safe((d) => {
+export const decodeNas = safe((d, depth = 0) => {
+  if (!d.length || d.length > 65535 || depth > 8) return null;
   if (d[0] === 0x7e && d.length > 2 && d[1] === 0) {
     const mt = d[2];
+    if ([0x67,0x68].includes(mt)) {
+      if(d.length<6)return {name:names.MM_NAMES[mt],type:'5GMM'};
+      const length=be16(d,4);
+      if(!length||length>d.length-6)return null;
+      if((d[3]&15)===1){
+        const inner=decodeNas(d.subarray(6,6+length),depth+1);if(!inner)return null;
+        let p=6+length,sessionId=null,requestedDnn=null;
+        while(p<d.length){
+          const ie=d[p++];if(ie>=128)continue;
+          if([0x12,0x59,0x58].includes(ie)){if(p>=d.length)return null;if(ie===0x12)sessionId=d[p];p++;continue;}
+          if(![0x22,0x25,0x24,0x37,0x3a].includes(ie))break;
+          if(p>=d.length)return null;const size=d[p++];if(size>d.length-p)return null;
+          if(ie===0x25)requestedDnn=decodeApn(d.subarray(p,p+size));p+=size;
+        }
+        const dnn=mt===0x67&&inner.name==='PDU_SESSION_ESTABLISHMENT_REQUEST'&&(sessionId===null||sessionId===inner.pduSessionId)?requestedDnn:null;
+        return {...inner,dnn:inner.dnn??dnn,name:`${names.MM_NAMES[mt]} → ${inner.name}`};
+      }
+    }
     return {
       name: names.MM_NAMES[mt] ?? `5GMM 0x${mt.toString(16)}`,
       type: "5GMM",

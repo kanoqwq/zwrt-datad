@@ -245,6 +245,9 @@ const WORKER_KEEP: &[&str] = &[
     "codes",
     "pdu_types",
     "five_qi",
+    "qos_version",
+    "qos_domain",
+    "qos_sessions",
     "ambr",
     "nas_last",
     "nas_ts",
@@ -681,13 +684,25 @@ mod tests {
         let body = format!(
             r#"{{"state":"running","reason":"","client_id":7,"ts":{now},"total":25,"dropped":0,
             "rate":3.3,"cell":{{"pci":393,"arfcn":627264}},"codes":{{"0xb821":25}},
-            "pdu_types":{{"pcch":13}},"secret":"should-not-appear"}}"#
+            "pdu_types":{{"pcch":13}},"qos_version":1,"qos_domain":"5gs",
+            "qos_sessions":[{{"domain":"5gs","id":1,"qci":9,"apn":"internet","ambr_dl_bps":1000000000,"ambr_ul_bps":200000000}}],
+            "secret":"should-not-appear"}}"#
         );
         let p = write_status_file(&dir, &body);
         let st = read_status(&p, SystemTime::now()).expect("parse");
         assert_eq!(st["state"], json!("running"));
         assert_eq!(st["cell"]["pci"], json!(393));
         assert_eq!(st["codes"]["0xb821"], json!(25));
+        assert_eq!(st["qos_version"], json!(1));
+        assert_eq!(st["qos_sessions"][0]["ambr_dl_bps"], json!(1_000_000_000));
+        let qos = crate::u50_qos::state(
+            &json!({"available":true,"qos_version":st["qos_version"],
+            "qos_domain":st["qos_domain"],"qos_sessions":st["qos_sessions"]}),
+            "SA",
+            crate::qos::Values::default,
+        );
+        assert_eq!(qos["ambr_dl"], json!("1000.000"));
+        assert_eq!(qos["ambr_ul"], json!("200.000"));
         assert!(st.get("secret").is_none());
         assert!(st.get("client_id").is_none());
         // stale

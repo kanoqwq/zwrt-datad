@@ -106,4 +106,7 @@ pub const IDS: &[&str] = &[
     "SET_DEVICE_MTU",
     "SHUTDOWN_DEVICE",
     "WAN_PERFORM_NR5G_SANSA_BAND_LOCK",
+    "LOW_CURRENT_MODE_SWITCH",
+    "SET_WIFI_SLEEP_INFO",
+    "WIFI_NFC_SET",
 ];

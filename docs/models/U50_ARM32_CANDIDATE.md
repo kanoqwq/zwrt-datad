@@ -358,8 +358,14 @@ One libdiag caveat is baked into the worker: `diag_register_dci_client`'s
 documented-as-unused fourth parameter is dereferenced by the library, so an
 `int` must be passed. The captured stream is the standard RRC OTA log
 (`[len][code][timestamp][payload]`); decoding RRC reconfigurations into QoS
-identifiers (5QI) is the next milestone — the messages are already captured,
-with the serving cell verified from the log header (PCI/ARFCN).
+identifiers is not done by guessing RRC bytes. The existing NAS subscriptions
+now decode default-flow 5QI and Session-AMBR (5GS), or default-bearer QCI and
+APN-AMBR (EPS), into bounded per-session state. Identified non-IMS data QoS
+is published directly as `/state.qos`; AMBR strings remain in Mbps with three
+decimal places. See [STATE_SCHEMA.md](../STATE_SCHEMA.md) for selection,
+release, fallback and freshness semantics. No new subscriptions, timers or
+redial loop are introduced. An on-device SA replay and live redial verified
+5QI 9 with 1 Gbps downlink / 200 Mbps uplink; EPS coverage is synthetic.
 
 ### On-demand packet streamer (`signal.stream.*`, v0.10.67)
 

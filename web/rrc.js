@@ -8,6 +8,10 @@ const exact = (value) =>
   value <= BigInt(Number.MAX_SAFE_INTEGER)
     ? Number(value)
     : value.toString();
+let capabilityDecoder = null;
+export function decodeCapabilityRequest(type, payload) {
+  return capabilityDecoder?.decodeRequest(type, payload) ?? null;
+}
 class Bits {
   constructor(bytes) {
     this.bytes = bytes;
@@ -65,10 +69,27 @@ class Bits {
 export class RrcDecoder {
   constructor(schema) {
     this.schema = schema;
+    capabilityDecoder = this;
+  }
+  decodeRequest(type, payload) {
+    if (!['nr','eutra-nr','eutra','bands','common'].includes(type)) return null;
+    let root=this.schema.roots['REQUEST:'+(type==='eutra-nr'?'nr':type)];
+    if(type==='eutra'){
+      root=this.schema.roots['LTE:DL_DCCH'];
+      for(const field of ['message','c1','ueCapabilityEnquiry'])
+        root=this.schema.nodes[root]?.root?.find(f=>f[0]===field)?.[1];
+    }
+    const result = this.decodeRoot(root, payload);
+    if (!result || result.trailingBits > 7) return null;
+    for (let bit=result.consumedBits; bit<payload.length*8; bit++)
+      if (payload[bit>>3] & (128 >> (bit%8))) return null;
+    return { ...result, transportPaddingBytes: 0 };
   }
   decode(radio, channel, payload) {
+    return this.decodeRoot(this.schema.roots[`${radio}:${channel}`],payload);
+  }
+  decodeRoot(root, payload) {
     if (!payload.length || payload.length > 65535) return null;
-    const root = this.schema.roots[`${radio}:${channel}`];
     if (root === undefined) return null;
     try {
       const bits = new Bits(payload),

@@ -61,6 +61,43 @@ def signal_fixture(wire=False, mcs=17):
     return out
 
 
+def qos_continuity_fixture(release=False):
+    fixture=json.loads((ROOT/'tests/fixtures/nas-qos.json').read_text(encoding='utf-8'))
+    accept=bytearray.fromhex(fixture['accept'].removesuffix('250908696e7465726e6574'));accept[2]=1
+    messages=[bytes.fromhex('7e00680100042e0101d3')] if release else [
+        bytes.fromhex('7e00670100062e0101c1ffff1201250908696e7465726e6574'),
+        bytes([0x7e,0,0x68,1,0,len(accept)])+accept]
+    output=b''
+    for index,nas in enumerate(messages):
+        body=bytes([1,0,0,0,15,4,0])+nas
+        packet=struct.pack('<HHQ',12+len(body),0xb80b,2000000+index)+body
+        output+=struct.pack('<I',len(packet))+packet
+    return list(output)
+
+
+def vendor_fixture(datang=False,ta=None,uplink=False):
+    cases = json.loads((ROOT / ('tests/fixtures/sigweb-vendor-profiles.json' if datang else 'tests/fixtures/sigweb-vendor-captured.json')).read_text(encoding='utf-8'))['cases']
+    output = b''
+    for index, role in enumerate(['broadcast'] if datang else ['setup', 'query']):
+        sample = next(c for c in cases if c['name'] == ('datang-nr-sib1-ims' if datang else 'qualcomm-nr-pci393-' + role))
+        payload = bytes.fromhex(sample['payload'])
+        header = bytearray(31)
+        header[0] = 17
+        struct.pack_into('<H', header, 7, 468 if datang else 393)
+        struct.pack_into('<I', header, 17, 504990 if datang else 627264)
+        header[24] = {'broadcast':2, 'setup':3, 'query':4}[role]
+        struct.pack_into('<H', header, 29, len(payload))
+        packet = struct.pack('<HHQ', 12 + len(header) + len(payload), 0xb821, 1000000 + index) + header + payload
+        output += struct.pack('<I', len(packet)) + packet
+    if uplink:
+        for record in json.loads((ROOT/'tests/fixtures/uplink-tb-counts.json').read_text(encoding='utf-8'))['records']:
+            packet=bytes.fromhex(record['packet']);output+=struct.pack('<I',len(packet))+packet
+    if ta is not None:
+        record=json.loads((ROOT/'tests/fixtures/ta-distance-labels.json').read_text(encoding='utf-8'))['records'][ta]
+        packet=bytes.fromhex(record['packet']);output+=struct.pack('<I',len(packet))+packet
+    return output
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
@@ -233,6 +270,31 @@ try:
         page.get_by_label('管理密码', exact=False).fill('fixture-password')
         page.get_by_role('button', name='登录设备', exact=True).click()
         page.get_by_text('9007199254740993', exact=True).first.wait_for()
+        worker_path='assets/'+next((DIST/'assets').glob('signal-worker-*.js')).name
+        result=page.evaluate('''async ({path,establish,release})=>{
+            const worker=new Worker(new URL(path,document.baseURI),{type:'module'});
+            let id=0;
+            const send=value=>new Promise((resolve,reject)=>{
+                const key=++id;
+                worker.onmessage=({data})=>data.kind==='error'?reject(Error(data.message)):resolve(data);
+                worker.onerror=event=>reject(Error(event.message));
+                worker.postMessage({id:key,...value});
+            });
+            const state={net:{type:'LTE',net_select:'Only_5G'},sim:{iccid:'fixture-a'}};
+            try{
+                await send({kind:'reset',schemaUrl:new URL('rrc-schema.json',document.baseURI).href,wire:false,state});
+                let reply=await send({kind:'chunk',buffer:Uint8Array.from(establish).buffer,state});
+                const names=reply.events.map(event=>event.nas?.name);
+                for(const type of ['LTE','SA','LTE','ENDC','LTE'])
+                    reply=await send({kind:'network',state:{...state,net:{type,net_select:'AUTO'}}});
+                const retained={qci:reply.cards.qci,ambr:reply.cards.ambr,apn:reply.cards.qosApn};
+                reply=await send({kind:'chunk',buffer:Uint8Array.from(release).buffer});
+                return {names,retained,released:reply.cards.qci};
+            }finally{worker.terminate();}
+        }''',{'path':worker_path,'establish':qos_continuity_fixture(),'release':qos_continuity_fixture(True)})
+        assert result['retained']=={'qci':'9','ambr':{'dl':'1Gbps','ul':'200Mbps'},'apn':'internet'},result
+        assert result['released'] is None,result
+        assert result['names']==['UL_NAS_TRANSPORT → PDU_SESSION_ESTABLISHMENT_REQUEST','DL_NAS_TRANSPORT → PDU_SESSION_ESTABLISHMENT_ACCEPT'],result
 
         def go(route, title):
             page.evaluate('(route)=>location.hash=route', route)
@@ -454,10 +516,22 @@ try:
         expect(page.get_by_role('button',name='导入抓包',exact=True)).to_be_visible()
         page.locator('input[type=file][accept=".bin"]').set_input_files({'name':'synthetic-layouts.bin','mimeType':'application/octet-stream','buffer':signal_fixture()})
         page.get_by_text('导入完成', exact=True).first.wait_for()
-        page.get_by_text('50.00%', exact=True).first.wait_for()
-        page.get_by_text('MCS 17 · 64QAM', exact=True).first.wait_for()
+        page.get_by_text('DL 50.00%', exact=True).first.wait_for()
+        page.get_by_text('MCS ↓17 ↑—', exact=True).first.wait_for()
+        expect(page.locator('[data-card-kind="link"] .signal-link-direction').nth(1)).to_have_text('UL 未上报')
         page.get_by_text('QCI 9', exact=True).first.wait_for()
         page.get_by_text('PCI 10', exact=True).first.wait_for()
+        for width in (320,390,1920,1360):
+            page.set_viewport_size({'width':width,'height':950})
+            metric_cards=page.locator('.signal-metric-card')
+            heights=metric_cards.evaluate_all('cards=>cards.map(el=>el.offsetHeight)')
+            assert set(heights)=={80 if width<=390 else 84},heights
+            grid=page.locator('.signal-card-grid')
+            columns=grid.evaluate('el=>getComputedStyle(el).gridTemplateColumns.split(" ").length')
+            assert columns==(3 if width<=390 else 9 if width==1920 else 6),(width,columns)
+            page.wait_for_function("()=>{const rows=[...document.querySelectorAll('.signal-link-direction')];return rows.length===2&&rows.every(el=>el.scrollWidth<=el.clientWidth)}")
+            assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
+            metric_cards.first.locator('..').screenshot(path=str(ROOT/f'build/reports/web-link-directions-{width}.png'))
         page.get_by_role('button', name='BLER / MCS', exact=False).click()
         page.get_by_role('dialog').get_by_text('本包 TB', exact=True).wait_for()
         page.get_by_role('dialog').get_by_text('2', exact=True).first.wait_for()
@@ -465,7 +539,7 @@ try:
         page.get_by_role('button', name='导出', exact=True).click()
         with page.expect_download() as exported:
             page.get_by_role('menuitem', name='完整帧与解码 NDJSON', exact=False).click()
-        records = [json.loads(line) for line in Path(exported.value.path()).read_text().splitlines()]
+        records = [json.loads(line) for line in Path(exported.value.path()).read_text(encoding='utf-8').splitlines()]
         assert len(records) == 3 and all(r.get('diag_packet_hex') and r.get('payload_hex') for r in records)
         page.screenshot(path=str(ROOT / 'build/reports/web-signal-cards.png'), full_page=True)
         # The live stream uses Bearer and an outer code; stop must cancel reconnect work.
@@ -483,7 +557,7 @@ try:
             expect(page.get_by_role('combobox',name='信令页网络模式',exact=True)).to_have_css('background-color',normal)
             page.screenshot(path=str(ROOT / f'build/reports/web-toast-{scheme}.png'),full_page=True)
         page.get_by_role('button',name='切换明暗主题',exact=True).click()
-        page.get_by_text('50.00%', exact=True).first.wait_for()
+        page.get_by_text('DL 50.00%', exact=True).first.wait_for()
         page.get_by_role('button', name='停止', exact=True).click()
         page.wait_for_timeout(300)
         requests_at_stop = len([t for t in trace if t[1] == '/signal/stream'])
@@ -539,7 +613,50 @@ try:
         page.wait_for_timeout(250)
         assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
         page.screenshot(path=str(ROOT/'build/reports/web-signal-capture-compact-mobile.png'))
+        page.get_by_role('button', name='展开实时采集', exact=True).click()
+        page.locator('input[type=file][accept=".bin"]').set_input_files({'name':'vendor-real-rrc.bin','mimeType':'application/octet-stream','buffer':vendor_fixture(ta=0,uplink=True)})
+        page.get_by_text('PCI 393', exact=True).first.wait_for()
+        expect(page.locator('[data-card-kind="vendor"] .value')).to_have_text('中兴(80%)')
+        expect(page.get_by_test_id('ta-distance-button')).to_contain_text('千米')
+        expect(page.locator('[data-card-kind="link"] .signal-link-direction').nth(1)).to_contain_text('UL 重传')
+        for width in (320,390):
+            page.set_viewport_size({'width':width,'height':844})
+            assert page.locator('[data-card-kind="vendor"] .value').evaluate('el=>el.scrollWidth<=el.clientWidth'), 'vendor percentage was clipped'
+            assert page.evaluate('document.documentElement.scrollWidth<=innerWidth'), 'TA header overflow'
+            page.locator('.signal-cards-panel').screenshot(path=str(ROOT/f'build/reports/web-compact-ta-ul-{width}.png'))
+            assert page.locator('[data-card-kind="link"] .signal-link-direction').evaluate_all('rows=>rows.every(el=>el.scrollWidth<=el.clientWidth)'), page.locator('[data-card-kind="link"] .signal-link-direction').evaluate_all('rows=>rows.map(el=>({text:el.textContent,width:el.clientWidth,needed:el.scrollWidth,font:getComputedStyle(el).fontSize}))')
+        page.get_by_role('button', name='基站厂商', exact=False).click()
+        dialog = page.get_by_role('dialog')
+        dialog.get_by_text('中兴(80%)', exact=True).first.wait_for()
+        reference = dialog.get_by_test_id('vendor-reference')
+        reference.get_by_text('推断参考 · 样例相似度', exact=True).wait_for()
+        expect(reference.locator('li')).to_have_count(5)
+        assert reference.locator('li strong').all_text_contents() == ['80%', '44%', '20%', '11%', '—']
+        reference.locator('summary').click()
+        assert reference.locator('details').evaluate('el=>el.open')
+        assert reference.evaluate('el=>el.scrollWidth<=el.clientWidth')
+        assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
+        page.screenshot(path=str(ROOT/'build/reports/web-vendor-reference-mobile.png'))
+        dialog.get_by_role('button',name='关闭',exact=True).click()
+        page.locator('input[type=file][accept=".bin"]').set_input_files({'name':'ta-metres.bin','mimeType':'application/octet-stream','buffer':vendor_fixture(ta=1,uplink=True)})
+        expect(page.get_by_test_id('ta-distance-button')).to_have_text('TA · 897.8 米')
         page.set_viewport_size({'width':1360,'height':950})
+        page.get_by_role('button', name='基站厂商', exact=False).click()
+        page.get_by_role('dialog').get_by_test_id('vendor-reference').wait_for()
+        page.screenshot(path=str(ROOT/'build/reports/web-vendor-reference-desktop.png'))
+        page.get_by_role('dialog').get_by_role('button',name='关闭',exact=True).click()
+        page.locator('input[type=file][accept=".bin"]').set_input_files({'name':'vendor-datang-rrc.bin','mimeType':'application/octet-stream','buffer':vendor_fixture(datang=True)})
+        page.get_by_text('PCI 468', exact=True).first.wait_for()
+        expect(page.locator('[data-card-kind="vendor"] .value')).to_have_text('大唐(100%)')
+        page.get_by_role('button', name='基站厂商', exact=False).click()
+        dialog = page.get_by_role('dialog')
+        dialog.get_by_text('大唐(100%)', exact=True).first.wait_for()
+        expect(dialog).to_contain_text('现场特征（用户提供）')
+        datang_row=dialog.get_by_test_id('vendor-reference').locator('li').filter(has_text='大唐')
+        expect(datang_row.locator('strong')).to_have_text('100%')
+        expect(datang_row).to_contain_text('1 项')
+        page.screenshot(path=str(ROOT/'build/reports/web-vendor-datang-desktop.png'))
+        dialog.get_by_role('button',name='关闭',exact=True).click()
         go('usage', '历史流量统计')
         page.get_by_text('2 天记录', exact=False).first.wait_for()
         page.screenshot(path=str(ROOT / 'build/reports/web-usage-desktop.png'), full_page=True)

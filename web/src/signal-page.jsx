@@ -512,7 +512,7 @@ export function SignalPage() {
                 <Accordion.Item value="tree">
                   <Accordion.Control>RRC 协议树</Accordion.Control>
                   <Accordion.Panel>
-                    <RrcTree value={event.tree} />
+                    <RrcTree value={event.vendorFingerprint?.decodedFilters?.length?{rrc:event.tree,capabilityRequestFilters:event.vendorFingerprint.decodedFilters}:event.tree} />
                   </Accordion.Panel>
                 </Accordion.Item>
               )}
@@ -757,7 +757,7 @@ export function SignalPage() {
                           void inspect(entry);
                         }}
                       >
-                        <Text size="sm" className="value">
+                        <Text size="sm" className="value" truncate="end" maw={400}>
                           {event.name}
                         </Text>
                         {event.cell && (

@@ -253,7 +253,13 @@ fn battery_extra_with(ps: impl Fn(&str, &str) -> Option<String>) -> Map<String, 
     if let Some(value) = ps_i64("usb", "voltage_now") {
         out.insert("chg_uv".into(), json!(value));
     }
-    if let Some(value) = ps_i64("usb", "input_current_now") {
+    // U50 Pro exposes measured USB input current as current_now (microamps).
+    // Retain input_current_now for older firmware; neither a current limit
+    // nor the battery's net current is a substitute for this measurement.
+    if let Some(value) = ps_i64("usb", "current_now")
+        .filter(|value| *value >= 0)
+        .or_else(|| ps_i64("usb", "input_current_now").filter(|value| *value >= 0))
+    {
         out.insert("chg_ua".into(), json!(value));
     }
     if let Some(value) = ps_i64("battery", "voltage_now") {
@@ -690,6 +696,49 @@ mod tests {
     }
 
     #[test]
+    fn usb_current_uses_the_measured_node_and_preserves_real_zero() {
+        for value in ["502810", "0"] {
+            let extra = battery_fixture(
+                "usb-current-primary",
+                &[
+                    ("usb", "current_now", value),
+                    ("usb", "input_current_now", "900000"),
+                    ("usb", "online", "0"),
+                    ("battery", "current_now", "249633"),
+                ],
+            );
+            assert_eq!(extra["chg_ua"], value.parse::<i64>().unwrap());
+        }
+    }
+
+    #[test]
+    fn usb_current_fallback_never_fabricates_a_missing_measurement() {
+        for primary in [
+            None,
+            Some("unavailable"),
+            Some("-1"),
+            Some("9223372036854775808"),
+        ] {
+            let mut values = vec![("usb", "input_current_now", "456000")];
+            if let Some(primary) = primary {
+                values.push(("usb", "current_now", primary));
+            }
+            let extra = battery_fixture("usb-current-fallback", &values);
+            assert_eq!(extra["chg_ua"], 456000);
+        }
+        for values in [
+            vec![],
+            vec![("battery", "current_now", "502810")],
+            vec![
+                ("usb", "current_now", "bad"),
+                ("usb", "input_current_now", "-1"),
+            ],
+        ] {
+            assert!(!battery_fixture("usb-current-unknown", &values).contains_key("chg_ua"));
+        }
+    }
+
+    #[test]
     fn battery_sign_and_capacity_follow_the_recognized_state() {
         // sdxlemur (U50 Pro): positive current while charging, capacity from
         // the learned full charge, charger presence from the USB node.
@@ -731,15 +780,17 @@ mod tests {
         }
 
         // Discharging keeps the collector convention: negative while draining.
-        let extra = battery_fixture(
-            "discharging",
-            &[
-                ("battery", "status", "Discharging"),
-                ("battery", "current_now", "300000"),
-            ],
-        );
-        assert_eq!(extra["bat_ua"], json!(-300000));
-        assert_eq!(extra["charging"], json!(2));
+        for raw in ["467000", "-467000"] {
+            let extra = battery_fixture(
+                "discharging",
+                &[
+                    ("battery", "status", "Discharging"),
+                    ("battery", "current_now", raw),
+                ],
+            );
+            assert_eq!(extra["bat_ua"], json!(-467000));
+            assert_eq!(extra["charging"], json!(2));
+        }
 
         // Without a recognized status the raw sign is preserved untouched.
         let extra = battery_fixture("unrecognized", &[("battery", "current_now", "250000")]);

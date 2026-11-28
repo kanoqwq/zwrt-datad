@@ -29,7 +29,7 @@ cat > "$ROOT/build/arm32-toolchain/cc-glibc" <<SH
 exec "\${ZIG:?}" cc -target arm-linux-gnueabihf "\$@"
 SH
 chmod +x "$ROOT/build/arm32-toolchain/cc-glibc"
-"$ROOT/build/arm32-toolchain/cc-glibc" -Os -Wl,--strip-all -fno-stack-protector   -o "$ROOT/build/u50-diag-worker" "$ROOT/rust/u50_diag_worker.c" -ldl
+"$ROOT/build/arm32-toolchain/cc-glibc" -Os -Wl,--strip-all -fno-stack-protector   -o "$ROOT/build/u50-diag-worker" "$ROOT/rust/u50_diag_worker.c" -ldl -pthread
 file "$ROOT/build/u50-diag-worker" | grep -q "ELF 32-bit.*ARM"
 export DATAD_DIAG_WORKER="$ROOT/build/u50-diag-worker"
 

@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vite build && node embed.mjs",
-    "test": "node --test ../tests/web_unit_test.mjs ../tests/web_app_ports_test.mjs ../tests/web_signal_state_test.mjs ../tests/web_toast_test.mjs ../tests/web_login_test.mjs"
+    "test": "node --test ../tests/web_unit_test.mjs ../tests/web_app_ports_test.mjs ../tests/web_signal_state_test.mjs ../tests/web_qos_continuity_test.mjs ../tests/web_vendor_test.mjs ../tests/web_link_summary_test.mjs ../tests/web_toast_test.mjs ../tests/web_login_test.mjs"
   },
   "dependencies": {
     "@mantine/charts": "9.8.1",

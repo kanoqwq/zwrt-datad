@@ -22,7 +22,7 @@ exec "${ZIG:?}" ar "$@"
 SH
 chmod +x "$OUT/toolchain/cc" "$OUT/toolchain/ar"
 export ZIG
-"$ZIG" cc -target arm-linux-gnueabihf -Os -Wl,--strip-all -fno-stack-protector -o "$OUT/diag-worker" "$ROOT/rust/u50_diag_worker.c" -ldl
+"$ZIG" cc -target arm-linux-gnueabihf -Os -Wl,--strip-all -fno-stack-protector -o "$OUT/diag-worker" "$ROOT/rust/u50_diag_worker.c" -ldl -pthread
 "$ZIG" cc -target arm-linux-gnueabihf -Os -Wl,--strip-all -fno-stack-protector -o "$OUT/diag-streamer" "$ROOT/rust/u50_diag_streamer.c" -ldl -pthread
 "$ZIG" cc -target arm-linux-gnueabihf.2.31 -mcpu=cortex_a7 -std=c11 -Os -fPIC -pie -s -Wall -Wextra -Werror "$ROOT/rust/efs_worker.c" -ldl -o "$OUT/efs-worker"
 export DATAD_DIAG_WORKER="$OUT/diag-worker" DATAD_DIAG_STREAMER="$OUT/diag-streamer" DATAD_EFS_WORKER="$OUT/efs-worker"

@@ -35,6 +35,7 @@ mod u50_diag;
 mod u50_oem;
 mod u50_oem_ids;
 mod u50_panel;
+mod u50_qos;
 mod u50_root;
 mod u50_signal;
 mod u50_sys;

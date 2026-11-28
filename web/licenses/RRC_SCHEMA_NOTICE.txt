@@ -8,3 +8,26 @@ include the Python interpreter or pycrate runtime code. RrcUperDecoder.kt is an
 independent Kotlin implementation tested against pycrate-produced JSON.
 The upstream license text is reproduced in RRC_SCHEMA_LICENSE.txt alongside this
 notice. Protocol definitions originate from 3GPP TS 36.331 / TS 38.331.
+
+sigweb-uni additionally exports UE-NR-Capability, UE-EUTRA-Capability and
+UE-MRDC-Capability from pycrate 0.8.1. Reproduce the graph with
+tools/generate_ue_capability_schema.py; it verifies the original App channel
+graph before appending these roots. No captured device data is in the schema.
+
+The graph also appends InterRATHandoverInfo and UE-RadioAccessCapabilityInfo
+from pycrate 0.8.1 RRC3G (3GPP TS 25.331). Existing channel and capability
+nodes retain their original indices and contents. The prose-defined inner
+UTRA OCTET STRING is decoded separately while preserving its original bytes.
+
+GERAN capability grammar data is exported from pycrate 0.8.1 modules
+pycrate_csn1dir.classmark_3_value_part,
+pycrate_csn1dir.ms_radio_access_capability_2_ie and pycrate_mobile.TS24008_IE.
+The grammar and CSN.1 behavior references are distributed under LGPL-2.1-or-later.
+Copyright 2018 Benoit Michau, ANSSI, P1sec. Reproduce the exported graph with
+tools/generate_geran_schema.py. The JavaScript runtime decodes these declarations
+without importing Python or executing dynamic callbacks.
+
+Capability enquiry filters append explicit UE-CapabilityRequestFilterNR,
+FreqBandList and UE-CapabilityRequestFilterCommon roots from RRCNR. The exporter
+preserves all preceding nodes and roots. Their prose-defined containers are
+decoded separately without altering the original received OCTET STRING.

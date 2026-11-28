@@ -37,6 +37,10 @@ import {
   measuredServing,
 } from "../signal-cards.js";
 import { Panel, useServices } from "./ui.jsx";
+import { VendorReference } from "./vendor-reference.jsx";
+import {vendorCardDisplay} from '../vendor-state.js';
+import {linkSummary} from '../link-summary.js';
+import {formatDistance,taDistanceLabel} from '../sigweb/distance-label.js';
 
 const when = (ts) =>
   ts ? new Date(ts).toLocaleTimeString("zh-CN", { hour12: false }) : "尚未上报";
@@ -152,7 +156,7 @@ function ServingContent({ cards, state }) {
       k,
     )
       ? "测量来源"
-      : ["高铁专网识别", "识别依据", "厂商（推断）", "运营商", "PLMN"].includes(
+      : ["高铁专网识别", "识别依据", "基站厂商", "运营商", "PLMN"].includes(
             k,
           )
         ? "网络识别"
@@ -435,6 +439,9 @@ function QosContent({ cards }) {
 function PowerContent({ cards }) {
   return (
     <Stack gap="md">
+      {cards.vendorEvidence?.broadcast?.referenceSignalPower!=null&&<Text size="xs" c="dimmed">
+        下行参考功率 · {cards.radio==='NR'?'ss-PBCH-BlockPower':'referenceSignalPower'}：{cards.vendorEvidence.broadcast.referenceSignalPower} dBm/RE。此值不是基站总功率，也不是 UE 实测上行功率。
+      </Text>}
       {[
         ["PUSCH", cards.pusch],
         ["PUCCH", cards.pucch],
@@ -523,7 +530,8 @@ function NeighborsContent({ cards }) {
 }
 export function SignalDetails({ store, kind }) {
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot),
-    c = snapshot.cards;
+    c = snapshot.cards,
+    vendor=useMemo(()=>vendorCardDisplay(c),[c.vendorEvidence,c.vendorResult,c.vendor]);
   return (
     <ScrollArea.Autosize mah="65vh" offsetScrollbars>
       {kind === "serving" ? (
@@ -539,20 +547,23 @@ export function SignalDetails({ store, kind }) {
       ) : kind === "power" ? (
         <PowerContent cards={c} />
       ) : kind === "vendor" ? (
-        <Stack>
-          <Text fw={600}>{c.vendor ?? "未知"}</Text>
-          <Text size="sm" style={{ whiteSpace: "pre-wrap" }}>
+        <Stack gap="sm">
+          <DetailRows rows={[["基站厂商",vendor.label],...(vendor.reference?[["规则匹配结果",c.vendor??"未知"]]:[]),["制式",c.radio??"—"],["PCI",c.cell?.pci??"—"]]} />
+          <VendorReference evidence={c.vendorEvidence} retained={c.vendorResult?.retained} />
+          <Text fz={11} fw={600}>识别依据</Text>
+          <Text size="xs" style={{ whiteSpace: "pre-wrap",overflowWrap:"anywhere" }}>
             {c.vendorDetail ??
               (c.radio === "LTE"
                 ? "等待 LTE SIB2 的 deltaFList-PUCCH"
-                : "等待 NR SIB1 的 IMS / p0 证据")}
+                : "等待下行 UE 能力查询和主小区连接配置")}
           </Text>
+          <Text fz={10} c="dimmed">配置样例匹配不等于厂商身份确认；大唐现场规则仅用于 NR SIB1，P0 和参考功率不独立判厂商。</Text>
         </Stack>
       ) : kind === "ta" ? (
         c.timingAdvance ? (
           <Stack>
             <Text fz={22} fw={600}>
-              约 {c.timingAdvance.estimate.meters.toFixed(0)} 米
+              约 {formatDistance(c.timingAdvance.estimate.meters)}
             </Text>
             <DetailRows
               rows={[
@@ -605,6 +616,8 @@ export function SignalCards({
   const { ask } = useServices(),
     snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot),
     c = snapshot.cards,
+    vendor=useMemo(()=>vendorCardDisplay(c),[c.vendorEvidence,c.vendorResult,c.vendor]),
+    link=linkSummary(c),
     selected = dataSession(c.bearerQos),
     rail = highSpeedRail(c.radio, c.engineering),
     count = Object.values(c.engineering)
@@ -644,12 +657,12 @@ export function SignalCards({
     [
       "vendor",
       "基站厂商",
-      c.vendor ?? "—",
-      c.vendor
-        ? "指纹推断 · 查看证据"
+      vendor.label,
+      vendor.reference?"样例相似度 · 查看证据":c.vendor
+        ? c.vendorResult?.status==='unknown'?"样例未覆盖 · 查看推断参考":"配置样例 · 查看证据"
         : c.radio === "LTE"
           ? "等待 SIB2 指纹"
-          : "等待 SIB1 指纹",
+          : "等待能力查询 / 连接配置",
       Building2,
     ],
     [
@@ -681,8 +694,8 @@ export function SignalCards({
     [
       "link",
       "BLER / MCS",
-      c.bler ?? "—",
-      `MCS ${c.mcs ?? "—"}${c.modulation ? " · " + c.modulation : ""}`,
+      link.bler,
+      link.mcs,
       Activity,
     ],
     [
@@ -700,12 +713,16 @@ export function SignalCards({
   return (
     <Panel
       title="小区信息卡片"
+      className="signal-cards-panel"
+      compact
       icon={Radio}
       collapsible
       right={
-        <Group gap="xs">
+        <Group gap={4} wrap="nowrap">
           <Button
             size="compact-xs"
+            fz={10}
+            px={4}
             variant="subtle"
             disabled={networkBusy || !snapshot.running || snapshot.replay}
             onClick={onRedial}
@@ -714,16 +731,19 @@ export function SignalCards({
           </Button>
           <Button
             size="compact-xs"
+            fz={10}
+            px={4}
             variant="subtle"
+            data-testid="ta-distance-button"
             onClick={() => open("ta", "基站距离估算")}
           >
-            TA 距离
+            {taDistanceLabel(c.timingAdvance?.estimate?.meters)}
           </Button>
         </Group>
       }
     >
-      <Stack gap="sm">
-        <SimpleGrid cols={{ base: 2, md: 3 }} spacing="sm">
+      <Stack gap={6} className="signal-card-layout">
+        <Box className="signal-card-grid">
           {cards.map(([kind, title, value, sub, Icon]) => (
             <Card
               component="button"
@@ -731,39 +751,33 @@ export function SignalCards({
               key={kind}
               withBorder
               radius="md"
-              padding="md"
+              padding={6}
               className="signal-metric-card"
+              data-card-kind={kind}
+              aria-label={kind==="link"?`BLER / MCS; ${link.bler}; ${link.mcs}`:undefined}
               onClick={() =>
                 open(kind === "operator" ? "serving" : kind, title)
               }
             >
-              <Group gap={6}>
-                <Icon size={13} strokeWidth={1.6} />
-                <Text fz={10} c="dimmed">
+              <Group gap={4} wrap="nowrap">
+                <Icon size={12} strokeWidth={1.6} />
+                <Text c="dimmed" className="signal-card-title">
                   {title}
                 </Text>
               </Group>
               <Text
-                fz={kind === "qos" ? 14 : 16}
                 fw={600}
-                mt={10}
-                mb={5}
-                lineClamp={2}
+                lineClamp={kind==="link"?2:1}
                 className="value"
               >
-                {value}
+                {kind==="link"?<><span className="signal-link-direction">DL {c.bler??"—"}</span><span className="signal-link-direction">{link.uplink}</span></>:value}
               </Text>
-              <Text size="xs" c="dimmed" lineClamp={2}>
-                {sub}
+              <Text c="dimmed" lineClamp={1} className="signal-card-hint">
+                {kind==="serving"&&rail?`高铁 · ${sub}`:sub}
               </Text>
-              {kind === "serving" && rail && (
-                <Badge mt={5} size="xs" variant="light">
-                  高铁专网
-                </Badge>
-              )}
             </Card>
           ))}
-        </SimpleGrid>
+        </Box>
         <Text fz={10} c="dimmed">
           {snapshot.replay
             ? "回放数据"

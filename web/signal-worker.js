@@ -25,7 +25,7 @@ function network(state) {
   const mode = state?.net?.net_select,
     sim = state?.sim?.iccid;
   if (
-    (lastMode && mode && lastMode !== mode) ||
+    (lastMode && mode && lastMode !== mode && !cards.bearerQos.familyConfirmed) ||
     (lastSim && sim && lastSim !== sim)
   )
     cards = {

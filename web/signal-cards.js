@@ -12,6 +12,7 @@ import { emptyNrPower, correlateNrPower } from "./radio-context.js";
 import { lteCell } from "./lte.js";
 import { plmn } from "./nas.js";
 import { serving } from "./datad-models.js";
+import { updateVendorCard } from "./vendor-state.js";
 const fmt = (n) => (n == null ? "—" : String(n)),
   pct = (n) => (n == null ? null : n.toFixed(2) + "%");
 export const createCards = (patch = {}) => ({
@@ -22,6 +23,11 @@ export const createCards = (patch = {}) => ({
   vendor: null,
   vendorDetail: null,
   vendorCell: null,
+  vendorState: null,
+  vendorLastMatch: null,
+  vendorHistory: [],
+  vendorResult: null,
+  vendorEvidence: null,
   ambr: null,
   ambrName: null,
   qci: null,
@@ -29,6 +35,7 @@ export const createCards = (patch = {}) => ({
   bearerQos: emptyQos(),
   bler: null,
   mcs: null,
+  ulMcs: null,
   modulation: null,
   sector: null,
   band: null,
@@ -147,6 +154,10 @@ export function applyCards(previous, code, event) {
     tree = event.tree,
     lte = !!event.decodeEvidence && LTE_EVENTS.has(code),
     nr = kind === "nrServing" || (code === 0xb821 && !!tree);
+  if (event.cell && previous.cell && (event.radio ?? event.cell.radio) === previous.radio) {
+    const different = event.cell.pci !== previous.cell.pci || event.cell.arfcn != null && previous.cell.arfcn != null && event.cell.arfcn !== previous.cell.arfcn;
+    if (different && (now < (previous.vendorState?.lastAt ?? -Infinity) || ['BCCH_BCH','BCCH_DL_SCH','PCCH'].includes(event.channel))) return previous;
+  }
   if (nr)
     c =
       c.radio === "LTE"
@@ -155,6 +166,7 @@ export function applyCards(previous, code, event) {
               radio: "NR",
               lastNrAt: now,
               pendingTimingAdvance: c.pendingTimingAdvance,
+              vendorHistory: c.vendorHistory,
             }),
             c.bearerQos,
           )
@@ -163,7 +175,7 @@ export function applyCards(previous, code, event) {
     if (c.radio === "NR" && now - c.lastNrAt < 10000) {
       if (tree)
         c = { ...c, nrLinkConfig: updateLinkConfig(c.nrLinkConfig, tree) };
-      if (event.nas) c = qosState(c, updateQos(c.bearerQos, event.nas));
+      if (event.nas) c = qosState(c, updateQos(c.bearerQos, event.nas, now));
       return c === previous ? c : { ...c, updatedAt: now };
     }
     if (c.radio !== "LTE")
@@ -171,11 +183,18 @@ export function applyCards(previous, code, event) {
         createCards({
           radio: "LTE",
           pendingTimingAdvance: c.pendingTimingAdvance,
+          vendorHistory: c.vendorHistory,
         }),
         c.bearerQos,
       );
   }
   let cell = event.cell;
+  const hasFrequency=cell=>cell?.arfcn!=null&&!(cell.arfcn===0&&!cell.freq);
+  if(cell&&c.cell&&cell.pci===c.cell.pci&&(!hasFrequency(cell)||!hasFrequency(c.cell)||cell.arfcn===c.cell.arfcn)) {
+    const band=cell.band&&!['NR','LTE'].includes(cell.band)?cell.band:c.cell.band||cell.band;
+    cell={...c.cell,...Object.fromEntries(Object.entries(cell).filter(([,v])=>v!=null)),
+      arfcn:hasFrequency(cell)?cell.arfcn:c.cell.arfcn,freq:cell.freq>0?cell.freq:c.cell.freq,band};
+  }
   if (
     cell?.band === "NR" &&
     c.cell?.arfcn === cell.arfcn &&
@@ -190,12 +209,19 @@ export function applyCards(previous, code, event) {
       ([0xb0c0, 0xb0c1, 0xb0c2].includes(code) && c.radio === "LTE"))
   ) {
     const key = `${c.radio}:${cell.arfcn}:${cell.pci}`;
-    if (c.vendorCell !== key)
+    const old=previous.radio===c.radio?previous.cell:null,
+      changed=old&&(old.pci!==cell.pci||hasFrequency(old)&&hasFrequency(cell)&&old.arfcn!==cell.arfcn);
+    if(c.vendorCell!==key&&c.vendorCell!==null&&!changed)c={...c,vendorCell:key};
+    else if (c.vendorCell !== key)
       c = {
         ...c,
         timingAdvance: c.vendorCell === null ? c.timingAdvance : null,
         vendor: null,
         vendorDetail: null,
+        vendorState: null,
+        vendorLastMatch: null,
+        vendorResult: null,
+        vendorEvidence: null,
         vendorCell: key,
         servingMeasurement: null,
         measurementSnapshot: null,
@@ -212,6 +238,7 @@ export function applyCards(previous, code, event) {
         txPower: null,
         bler: null,
         mcs: null,
+        ulMcs: null,
         modulation: null,
         linkParams: {},
         lteMeasurements: emptyMeasurements(),
@@ -224,12 +251,10 @@ export function applyCards(previous, code, event) {
         selectedPlmnIndex: null,
       };
   }
-  if (event.vendorFingerprint?.radio === c.radio)
-    c = {
-      ...c,
-      vendor: event.vendorFingerprint.vendor,
-      vendorDetail: event.vendorFingerprint.detail,
-    };
+  const vendorIdentity=event.cellIdentity ?? (kind === 'nrServing' && value.cellId != null ? String(value.cellId) : c.radio === 'NR' ? nrCellIdentity(tree) : kind === 'lteServing' && value.cid != null ? String(value.cid) : undefined);
+  if (tree || cell && (c.vendorState?.cell?.pci !== cell.pci || cell.arfcn != null && c.vendorState?.cell?.arfcn !== cell.arfcn) ||
+      vendorIdentity != null && String(c.vendorState?.cell?.identity) !== String(vendorIdentity) || event.plmn)
+    c = updateVendorCard(c, {...event, cellIdentity:vendorIdentity});
   if (event.broadcastPlmns) {
     const listChanged =
       c.broadcastPlmns.length &&
@@ -275,7 +300,7 @@ export function applyCards(previous, code, event) {
       },
     };
   }
-  if (event.nas) c = qosState(c, updateQos(c.bearerQos, event.nas));
+  if (event.nas) c = qosState(c, updateQos(c.bearerQos, event.nas, now));
   if (c.pendingTimingAdvance) {
     const pending = c.pendingTimingAdvance;
     if (now - pending.updatedAt > 60000)
@@ -452,12 +477,11 @@ export function applyCards(previous, code, event) {
       last = grants.at(-1);
     c = {
       ...c,
+      ulMcs:last?String(last.mcs):null,
       linkParams: {
         ...c.linkParams,
         "UL grants（本包）": grants.length,
-        ...(last
-          ? { "UL RB": last.rb, "UL RB 起点": last.rbStart, "UL MCS": last.mcs }
-          : {}),
+        "UL RB":last?.rb??null,"UL RB 起点":last?.rbStart??null,"UL MCS":last?.mcs??null,
       },
     };
   }
@@ -692,6 +716,7 @@ export function linkRows(c) {
   return [
     ["MCS", c.mcs ?? "—"],
     ["调制方式", c.modulation ?? "—"],
+    ["下行 BLER",c.bler??"—"],["上行 BLER","未直接上报；重传统计见下方"],["上行 MCS",c.ulMcs??"—"],
     ...(c.radio === "NR"
       ? [
           [
@@ -716,7 +741,7 @@ export function linkRows(c) {
       ? [
           [
             "统计口径",
-            "CSI-RS：逻辑端口；Tx/Rx：终端收发链；grants：本包调度数。",
+            "CSI-RS：逻辑端口；Tx/Rx：终端收发链；grants：本包调度数。UL 重传率=重传 TB/(新传 TB+重传 TB)，为累计发送统计，不等同首传 BLER 或基站 CRC 结果。",
           ],
         ]
       : []),
@@ -814,7 +839,7 @@ export function servingRows(c, state) {
     ["modulation", "调制"],
     ["txPower", "PUSCH 功率"],
     ["qci", "QCI"],
-    ["vendor", "厂商（推断）"],
+    ["vendor", "基站厂商"],
   ])
     if (c[k] != null) rows.push([label, c[k]]);
   if (c.ambr) rows.push(["AMBR 下行 / 上行", `${c.ambr.dl} / ${c.ambr.ul}`]);

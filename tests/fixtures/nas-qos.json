@@ -1,0 +1,21 @@
+{
+  "source": "pycrate 0.8.1; EBI/E/Num encoder defects explicitly corrected against TS 24.501 9.11.4.8 and 9.11.4.12",
+  "standard": "https://www.etsi.org/deliver/etsi_ts/124500_124599/124501/16.05.01_60/ts_124501v160501p.pdf",
+  "rules": "01000631300101ff09",
+  "flows": "0920430101090701500203060064",
+  "mappedEps": "50000451010109",
+  "accept": "2e0100c211000901000631300101ff09060b00010600c8290501c00002017500075000045101010979000e09204301010907015002030600647b000880000d0401010101250908696e7465726e6574",
+  "expected": {
+    "qfi": 9,
+    "qi": 9,
+    "epsBearerId": 5,
+    "apn": "internet",
+    "ip": "192.0.2.1",
+    "ambr": {
+      "dl": "1Gbps",
+      "ul": "200Mbps"
+    },
+    "gfbr": "100Mbps",
+    "dns": "1.1.1.1"
+  }
+}

@@ -4,6 +4,9 @@ export const emptyQos = (activeFamily = null) => ({
   selected: null,
   activeFamily,
   epsIdentities: {},
+  familyConfirmed: false,
+  registrationConfirmed: false,
+  requests: {},
 });
 export const isDataSession = (s) =>
   !!s?.defaultBearer && !!s.apn && isDataApn(s.apn);
@@ -33,7 +36,7 @@ export const dataSession = (state) =>
   eligible(state, state.selected, state.sessions[state.selected])
     ? state.sessions[state.selected]
     : null;
-export function registeredNetwork(state, type) {
+export function registeredNetwork(state, type, confirmed = false, fromSession = false) {
   const key = String(type).trim().toUpperCase(),
     family =
       key === "SA"
@@ -41,17 +44,24 @@ export function registeredNetwork(state, type) {
         : ["LTE", "LTE_CA", "LTE_A", "ENDC", "LTE-NSA", "NSA"].includes(key)
           ? "LTE"
           : null;
-  if (!family || family === state.activeFamily) return state;
-  const retained = state.activeFamily
+  if (!family || fromSession && state.registrationConfirmed && family !== state.activeFamily || !confirmed && state.familyConfirmed) return state;
+  if (family === state.activeFamily) return confirmed && (!state.familyConfirmed || !fromSession && !state.registrationConfirmed) ? {...state,familyConfirmed:true,registrationConfirmed:state.registrationConfirmed||!fromSession} : state;
+  const retained = confirmed && state.activeFamily
     ? Object.fromEntries(
         Object.entries(state.sessions).filter(
           ([id]) => !id.startsWith(state.activeFamily + ":"),
         ),
       )
     : state.sessions;
-  return withSessions({ ...state, activeFamily: family }, retained);
+  const requests = confirmed && state.activeFamily ? Object.fromEntries(Object.entries(state.requests).filter(([key])=>!key.startsWith(state.activeFamily+':'))) : state.requests;
+  return withSessions({ ...state, activeFamily: family, familyConfirmed:confirmed, registrationConfirmed:confirmed&&!fromSession, requests }, retained);
 }
-export function updateQos(state, n) {
+const sameProcedureWindow=(now,then)=>Number.isFinite(now)&&Number.isFinite(then)&&now>=then&&now-then<=120000;
+export function updateQos(state, n, now = Date.now()) {
+  if(n.encrypted)return state;
+  const name=(n.name??'').split(/\s*→\s*/).at(-1);
+  if(name==='REGISTRATION_ACCEPT')state=registeredNetwork(state,'SA',true);
+  if(['LTE Attach Accept','LTE TAU Accept'].includes(name))state=registeredNetwork(state,'LTE',true);
   const nr = n.type === "5GSM",
     id = nr ? n.pduSessionId : n.epsBearerId;
   if (id == null || id < (nr ? 1 : 5) || id > 15) return state;
@@ -63,7 +73,7 @@ export function updateQos(state, n) {
       "LTE Deactivate EPS Bearer Accept",
       "PDU_SESSION_RELEASE_COMMAND",
       "PDU_SESSION_RELEASE_COMPLETE",
-    ].includes(n.name)
+    ].includes(name)
   ) {
     const remaining = Object.fromEntries(
         Object.entries(sessions).filter(
@@ -77,15 +87,24 @@ export function updateQos(state, n) {
     for (const k of removed)
       if (sessions[k].mappedEpsBearerId != null)
         delete identities[sessions[k].mappedEpsBearerId];
-    return withSessions({ ...state, epsIdentities: identities }, remaining);
+    const requests={...state.requests};delete requests[key];
+    return withSessions({ ...state, epsIdentities: identities, requests }, remaining);
+  }
+  if(name==='PDU_SESSION_ESTABLISHMENT_REQUEST')return {...state,requests:{...state.requests,[key]:{pti:n.pti,apn:n.dnn==null?null:normalizeApn(n.dnn),requestedAt:now}}};
+  if(name==='PDU_SESSION_ESTABLISHMENT_REJECT'){
+    const requests={...state.requests};if(requests[key]?.pti===n.pti)delete requests[key];
+    return {...state,requests};
   }
   const apn = n.dnn == null ? null : normalizeApn(n.dnn),
     established = [
       "LTE Activate Default EPS Bearer",
       "LTE Attach Accept",
       "PDU_SESSION_ESTABLISHMENT_ACCEPT",
-    ].includes(n.name);
-  let old = established ? null : sessions[key];
+    ].includes(name);
+  const pending=state.requests[key], prior=sessions[key];
+  const request=established&&Number.isInteger(n.pti)&&pending?.pti===n.pti&&sameProcedureWindow(now,pending.requestedAt)?pending:null;
+  const duplicate=established&&!pending&&Number.isInteger(n.pti)&&prior?.establishmentPti===n.pti&&sameProcedureWindow(now,prior.establishedAt);
+  let old = established && !duplicate ? null : prior;
   if (
     n.mappedEpsBearers?.some(
       (m) => m.operation === 2 && m.id === old?.mappedEpsBearerId,
@@ -122,6 +141,7 @@ export function updateQos(state, n) {
     priorEps = !nr && !established ? state.epsIdentities[n.epsBearerId] : null,
     network =
       apn ??
+      request?.apn ??
       old?.apn ??
       sessions[link]?.apn ??
       identity?.apn ??
@@ -169,12 +189,15 @@ export function updateQos(state, n) {
       flows,
       mappedEpsBearerId: mappedId,
       qiLabel: nr && flowQi !== null ? "5QI" : "QCI",
+      establishmentPti: established ? n.pti : old?.establishmentPti,
+      establishedAt: established && !duplicate ? now : old?.establishedAt,
     },
+    base = (established || name==='PDU_SESSION_MODIFICATION_COMMAND' || name==='LTE Modify EPS Bearer' && (state.activeFamily!=='NR'||!dataSession(state))) && isDataSession(session) ? registeredNetwork(state,nr?'SA':'LTE',true,true) : state,
     retained = established
       ? Object.fromEntries(
-          Object.entries(sessions).filter(([, s]) => s.linkedBearer !== key),
+          Object.entries(base.sessions).filter(([, s]) => s.linkedBearer !== key),
         )
-      : { ...sessions },
+      : { ...base.sessions },
     identities = { ...state.epsIdentities };
   if (established && sessions[key]?.mappedEpsBearerId != null)
     delete identities[sessions[key].mappedEpsBearerId];
@@ -237,9 +260,10 @@ export function updateQos(state, n) {
       ];
     }),
   );
+  const requests={...base.requests};if(established)delete requests[key];
   return withSessions(
-    { ...state, epsIdentities: identities },
+    { ...base, epsIdentities: identities, requests },
     next,
-    established && isDataSession(session) ? key : state.selected,
+    established && isDataSession(session) ? key : base.selected,
   );
 }

@@ -1,0 +1,66 @@
+{
+  "component": "sigweb-uni vendor matching and reference similarity",
+  "adaptation": "Only vendor.js import paths are adapted; protocol decoding uses the local RrcDecoder REQUEST roots.",
+  "entries": [
+    {
+      "source": "web/src/vendor.js",
+      "destination": "web/sigweb/vendor.js",
+      "sourceSHA256": "61f0a0e525f21d4c63dcb847152d469185e8925728a71d29b6a4edde0ecadaf5",
+      "installedSHA256": "e117028ea7b27878ed1bc42a327c796c8ec55469ee0d810b2cae9b8d778c01e4"
+    },
+    {
+      "source": "web/src/vendor-similarity.js",
+      "destination": "web/sigweb/vendor-similarity.js",
+      "sourceSHA256": "9584b99e6ebad206a5d5c1391e9e703a7b58703bbd769dc006db9d610114ec10",
+      "installedSHA256": "9584b99e6ebad206a5d5c1391e9e703a7b58703bbd769dc006db9d610114ec10"
+    },
+    {
+      "source": "web/src/vendor-display.js",
+      "destination": "web/sigweb/vendor-display.js",
+      "sourceSHA256": "f73d89c798dd5204b9b00c98460de9ecd4eef43ed124abecd3a6808e72a74724",
+      "installedSHA256": "f73d89c798dd5204b9b00c98460de9ecd4eef43ed124abecd3a6808e72a74724"
+    },
+    {
+      "source": "web/src/distance-label.js",
+      "destination": "web/sigweb/distance-label.js",
+      "sourceSHA256": "3f41d74a1e6ab8bd31014bd897fe3c6ae13f75d5386acaa285384f25efa6b347",
+      "installedSHA256": "3f41d74a1e6ab8bd31014bd897fe3c6ae13f75d5386acaa285384f25efa6b347"
+    },
+    {
+      "source": "web/src/rrc-scope.js",
+      "destination": "web/sigweb/rrc-scope.js",
+      "sourceSHA256": "f1520ed5a74a5b913030320bece034ce0a9af6bfd14f6c3125a039f7f0673246",
+      "installedSHA256": "f1520ed5a74a5b913030320bece034ce0a9af6bfd14f6c3125a039f7f0673246"
+    },
+    {
+      "source": "web/sigspec/rrc-schema.json",
+      "destination": "web/rrc-schema.json.gz",
+      "sourceSHA256": "d5915b1d5ec102f4b29505e26ba95076eb65f5293f94925b7542988bc7cf404b",
+      "installedSHA256": "d34e662ca215a0c3a355e2613b774be37096920b309288f8d9760dfbd32c312a"
+    },
+    {
+      "source": "web/sigspec/RRC_SCHEMA_NOTICE.txt",
+      "destination": "web/licenses/RRC_SCHEMA_NOTICE.txt",
+      "sourceSHA256": "3e3738e21189a6abae6e63dcce96af9f790d9a573a5d07269e64039f0c13df41",
+      "installedSHA256": "3e3738e21189a6abae6e63dcce96af9f790d9a573a5d07269e64039f0c13df41"
+    },
+    {
+      "source": "web/sigspec/RRC_SCHEMA_LICENSE.txt",
+      "destination": "web/licenses/RRC_SCHEMA_LICENSE.txt",
+      "sourceSHA256": "dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551",
+      "installedSHA256": "dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551"
+    },
+    {
+      "source": "tests/fixtures/vendor-profiles.json",
+      "destination": "tests/fixtures/sigweb-vendor-profiles.json",
+      "sourceSHA256": "4020172bf8c6ddac19eef040fd783d81127b11ed81a73a70ff37e63f5ec026f8",
+      "installedSHA256": "4020172bf8c6ddac19eef040fd783d81127b11ed81a73a70ff37e63f5ec026f8"
+    },
+    {
+      "source": "tests/fixtures/vendor-captured-requests.json",
+      "destination": "tests/fixtures/sigweb-vendor-captured.json",
+      "sourceSHA256": "488abbf9a126b03cdd15f1b939ce06682dfd7729748c1c1dfebadb165a3ed325",
+      "installedSHA256": "488abbf9a126b03cdd15f1b939ce06682dfd7729748c1c1dfebadb165a3ed325"
+    }
+  ]
+}

@@ -7,6 +7,7 @@ fn main() {
     println!("cargo:rerun-if-changed=efs_worker.c");
     println!("cargo:rerun-if-changed=keymaster_worker.rs");
     println!("cargo:rerun-if-changed=u50_diag_worker.c");
+    println!("cargo:rerun-if-changed=u50_nas_qos.h");
     println!("cargo:rerun-if-changed=u50_diag_streamer.c");
     let worker = if env::var_os("CARGO_FEATURE_KEYMASTER_WORKER").is_some() {
         Vec::new()

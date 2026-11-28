@@ -231,6 +231,9 @@ function decodePacketBase(code, packet, rrc, now) {
     const result = rrc.decode(nr ? "NR" : "LTE", channel, b.subarray(head));
     if (result) {
       event.tree = result.tree;
+      event.channel = channel;
+      event.radio = nr ? "NR" : "LTE";
+      event.decodeStatus = "decoded";
       event.evidence = "ASN.1";
       event.cell = { pci, arfcn, radio: nr ? "NR" : "LTE" };
       const message = result.tree.message,
@@ -338,12 +341,11 @@ export function decodePacket(code, packet, rrc, now = Date.now()) {
           : lteCell(event.cell.pci, event.cell.arfcn);
         Object.assign(event, rrcEvidence(event.tree, nr ? "NR" : "LTE"));
         if (!nr) event.neighbors = lteNeighbors(event.tree);
-        const evidence = vendorEvidence(nr ? "NR" : "LTE", event.tree);
+        const evidence = vendorEvidence(nr ? "NR" : "LTE", event.tree, event.channel);
         if (evidence) {
           event.vendorFingerprint = {
             ...evidence,
             ...vendorVerdict(evidence),
-            heuristic: true,
           };
           event.imsBit = evidence.ims ?? null;
           event.p0 =
@@ -385,17 +387,6 @@ export function decodePacket(code, packet, rrc, now = Date.now()) {
               freq: nrFrequency(arfcn),
               radio: "NR",
             };
-          const e = {
-            radio: "NR",
-            source: "SIB1 比特模式候选（未通过树解码）",
-            pusch: pair[0],
-            pucch: pair[1],
-          };
-          event.vendorFingerprint = {
-            ...e,
-            ...vendorVerdict(e),
-            heuristic: true,
-          };
           event.decodeScope = "功控对仅为比特模式候选，保留原包供核对";
         }
       }

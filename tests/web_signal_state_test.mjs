@@ -150,7 +150,7 @@ test("QoS selects the Internet default bearer and isolates mode switches, releas
   assert.equal(dataSession(q), null);
   q = updateQos(q, decodeEps(eps(6, "internet")).nas);
   assert.equal(dataSession(q).qci, "9");
-  q = registeredNetwork(q, "SA");
+  q = updateQos(q, {type:"5GMM",name:"REGISTRATION_ACCEPT"});
   assert.equal(dataSession(q), null);
   q = updateQos(q, {
     name: "PDU_SESSION_MODIFICATION_COMMAND",
@@ -182,7 +182,7 @@ test("QoS selects the Internet default bearer and isolates mode switches, releas
     pduSessionId: 1,
   });
   assert.equal(dataSession(q), null);
-  q = registeredNetwork(q, "NSA");
+  q = updateQos(q, {type:"EMM",name:"LTE TAU Accept"});
   assert.equal(q.activeFamily, "LTE");
   assert.equal(dataSession(q), null);
 });

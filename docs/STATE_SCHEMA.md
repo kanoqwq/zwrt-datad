@@ -314,6 +314,8 @@ SSE  /events
 - `runtime.cpu_usage_tenths` 与 `runtime.cpu_cores.*` 单位为百分比的十分之一，例如 `172` 表示 `17.2%`。每核心占用与频率按采样周期实时读取，不缓存计算结果。
 - 顶层 `sample_interval_ms` 是当前 datad 全局采样与 SSE 推送周期。可通过 `state.set_interval` 在 `500..5000` 毫秒范围内运行时切换；所有 SSE 客户端共享同一周期。
 - `net.lte_band`、`net.nr5g_sa_band_lock`、`net.nr5g_nsa_band_lock` 是主线同名的当前锁频别名（逗号频段表），供按主线路径适配的客户端直接回读校验；U50 自有名字 `net.lte_bands / sa_bands / nsa_bands` 继续提供且值一致。U50 上 LTE 锁频值以 `lte_band_lock` 十六进制掩码为准（固件不会在写入后及时刷新 `lte_band_ext_lock` 列表）。
+- U50 的当前 LTE 驻留频段读取 `net.band`（例如 `B8`），不能把锁频列表 `net.lte_band` 当作 PCC 频段。`net.lte_bw` 在 LTE/NSA 的有效同制式快照中提供；纯 SA 不应补报残留 LTE PCC。载波列表按 `ca_format` 解析，不能把 U50 原厂六列 LTE 描述符误当作通用五列或十一列布局。
+- U50 的 `battery.chg_ua` 是 USB 输入电流，整数 µA，优先读取 `/sys/class/power_supply/usb/current_now`，兼容旧固件的 `usb/input_current_now`。有效零值保留；节点缺失或不可解析时省略，不用电流上限或电池电流代替。`battery.bat_ua` 表示电池净电流；`battery/current_now` 根据明确的充放电状态归一为充电正、放电负；状态未知则保留底层符号。
 - `net.lte_supported_bands`、`net.nr_sa_supported_bands`、`net.nr_nsa_supported_bands` 来自原厂 Web 同源的 `zwrt_zte_nwinfo.default_band_lock` 能力目录，与本轮锁频值分离。`net.lte_bands`、`net.sa_bands`、`net.nsa_bands` 继续表示当前允许/锁定范围。消费者应优先读取结构化的 `net.band_capabilities`；只有 `complete=true` 时三个数组才是完整设备能力，`source=device_default_band_lock` 表示数据由设备自身默认频段目录提供。目录缺失或任一列表非法时 `complete=false`、`source=unavailable`，支持频段字符串和数组均不使用当前锁频值回填。
 - `runtime.cpu_freq_mhz` 单位为 MHz；`thermal_zones.temp_milli` 单位为毫摄氏度；`memory_kb` 单位为 KiB；`storage` 固定统计 `/data` 文件系统，`storage` 和 `throughput` 单位分别为字节和字节/秒。
 - `thermal` 是模板规范化后的温度接口，随 `/state` 与 SSE 的 `state` 事件一起发送。`thermal.cpu_celsius` 为模板 CPU 温度；MU5250、MC8532B、MC7523 和 MU5252 的 `thermal.zones` 来自主机 sysfs thermal zones，已过滤无效哨兵值和不可读 zone、按名称排序并转换为摄氏度。新消费者应使用该字段，不再自行解析 `runtime.thermal_zones[].temp_milli`。
@@ -325,7 +327,7 @@ SSE  /events
 - `cooling.fan.temperature_source` 为按类型发现的温控 sysfs 路径，未发现时为 `null`；`policy.{attempted,applied,error}` 给出最近策略应用结果。`mode` 仍表示保存的配置，故障时实际内核接管由 `kernel_zone_enabled` 表示。用户态控制解除驱动可选低速限幅并检查 PWM 读回；温度/驱动失败恢复内核温控，不再把静默失败当成自定义曲线已生效。
 - `cooling.liquid.driver_playing` 来自驱动 `ws_active`，为 `true` / `false`；旧驱动未提供时为 `null`。有该字段时，`cooling.liquid.active` 以驱动实际播放状态为准，即使配置为常开或 cooling state 大于零，`ws_active=0` 也报告未运行；字段缺失时才回退配置与 cooling state。
 - `runtime.throughput` 优先使用 `br-lan`，回退到 WiFi 接口，最后才使用 rmnet，并采用最多 16 个样本的滚动窗口平滑 IPA 批量刷新。
-- `qos.ambr_*` 为 Mbps 字符串，保留 3 位小数；空串表示当前还没从日志里读到有效值。
+- `qos.ambr_*` 为 Mbps 字符串，保留 3 位小数；空串表示尚无有效值。U50 的 NAS 解码结果同样遵守该单位约定，例如 1 Gbps / 200 Mbps 输出 `"1000.000"` / `"200.000"`。
 - `net.lte_tac` / `net.nr_tac`：服务小区跟踪区码（十进制）。LTE 取原厂 `nwinfo_get_netinfo.lac_code`（缺失时回退 UCI `zte_nwinfo.cell_info.lac_code`），NR 取 `nr5g_tac`（原厂 netinfo 通常不带，回退 UCI `zte_nwinfo.cell_info.nr5g_tac`）。未注册该制式或超出 3GPP 位宽（LTE 16 位、NR 24 位）时为 `0`；NSA/ENDC 下 NR TAC 通常为 `0`。`modems[id=x75].net` 同步提供这两个字段。
 - `net.nrca` / `net.lteca`：载波聚合描述符，`;` 分隔载波、`,` 分隔字段，每个载波 11 个字段 `idx,PCI,?,band,arfcn,bw,?,rsrp,rsrq,sinr,rssi`。没有载波聚合时为空串。
 - U50 原厂固件的 `net.nrca` 来自 `nr_multi_ca_scell_info`，仅列出副载波（10 列或含末尾 RSSI 的 11 列）；`band` 可为 `n1`、`bw` 可为 `20MHz`。主载波仍取同一快照的 `nr_pci` / `nr_channel` / `nr_band`，不能要求副载波列表包含 PCC。在 `ca_format="u50_oem"` 时第 3 列为副载波状态（`2` 已激活，`0`/`1` 未激活），第 7 列为上行配置（`1` 已配置，`0` 未配置）；这两个定义不能套用到其他机型的未知保留位。
@@ -347,7 +349,8 @@ SSE  /events
 - `nfc.switch/enabled/flag`：中兴原厂 NFC Wi-Fi 状态与目标 AP 标记。`nfc.set` 省略 `flag` 时保持当前原厂值，写入后必须读回确认；不再调用原厂页面未使用的 `zwrt_nfc_wifi_change`。
 - WiFi 段的键名用 `wlan` 而不是 `wifi`，避免消费端按子串查找时先命中 `clients.wifi` 计数。`wlan.key` 为明文密码，消费端应自行决定是否打码显示。
 - `qos.usb_mode`：`debug` 表示 ADB 开启，`user` 表示关闭；切换可调用 `ubus call zwrt_bsp.usb set '{"mode":"user|debug"}'`。
-- `qos.qci` / `qos.ambr_*`：来自 `key.log.0` / `key.log` 的 PDU/EPS 建立日志（偶发行）。后端启动时完整流式扫描两份日志，只缓存 `[DATA]` 解析材料；当前日志追加时增量读取，检测到 rename 轮转、截断或原地重写时完整重扫两份日志。当前 `key.log` 的有效候选优先于 `key.log.0`，后者只补充当前日志缺失的字段；同一日志内再优先采用当前 `net.mcc/net.mnc` 匹配的 `access_point=*.mncXXX.mccYYY.*` 承载。`dnn=ims` / emergency 这类信令承载不会覆盖主数据 AMBR；无 PLMN 的非 IMS `dnn=` 可作为主数据候选。裸 `qci = ...` 只有在紧跟有效数据承载上下文，或完全没有更可信 QCI 时才作为兜底；`qos.reload` 会主动失效缓存并重读。
+- U50 启用原有 `--u50-signaling` 后，`diag-worker` 从明文 NAS 的会话建立/修改/释放消息维护有界 QoS 状态，`/state.qos` 优先发布同一已确认上网 APN 承载的 `qci`（5GS 时为默认 QoS flow 的 5QI）和 `ambr_*`，`source="diag_nas"`。附带 `apn/session_id/domain/sampled_at`；5GS Session-AMBR 按单位字节和大端 16 位数值转换，EPS 按 APN-AMBR 编码转换。IMS/紧急承载、未知 APN 不会覆盖上网业务；多个上网会话不猜主承载（`reason="multiple_data_sessions"`）。释放、重新建立、初始注册、跨 NAS 域切换会清理对应状态；有效 worker 状态超过 5 秒未更新即不作为实时 NAS 结果。`u50_signaling.qos_sessions` 保留各活动会话的独立信息，内部 AMBR 为整数 bps。只复用已订阅的 NAS 回调与既有状态写入周期，不增加 DIAG 订阅、轮询、重拨号或后台唤醒。
+- 无当前 NAS 域、未启用信令或使用旧 worker 时，`qos.qci/ambr_*` 保持原有 `key.log.0` / `key.log` 兜底（`source="oem_key_log"`）。已收到 NAS 释放或已知域下尚无上网承载时，不把旧日志速率拼回 NAS 会话。日志读取在后端启动时流式扫描，只缓存 `[DATA]` 材料；追加时增量读取，轮转、截断、重写时重扫。当前 `key.log` 优先于 `.0`，并优先当前 PLMN 的非 IMS/紧急数据承载；`qos.reload` 失效日志缓存，不强制重拨号，也不伪造 NAS 承载。
 - `clients.list` 只包含固件无线/有线访问列表确认在线的设备，无线设备排列在有线设备之前；DHCP 租约只补全主机名和 IP，不决定在线状态。列表上限 32 条，消费端可自行截断显示。NFC 切换用 `ubus call zwrt_nfc zwrt_nfc_wifi_set '{"switch":0|1,"flag":2}'`。
 - `sms.unread` 默认每 5 秒读取一次；`sms.list` 启动、容量/未读统计变化、缓存失效及最长每 30 秒进行有界同步：NV/SIM 分别每页 64 条、最多 4 页，按消息 ID 去重，总上限 512 条。达到分页上限或设备重复返回整页时 `sms.truncated=true`。发送尝试结束、删除或标记已读成功后使缓存失效。读取/解密失败保留最近成功列表并设置 `sms.stale=true`、`sms.error`，不把失败伪装成成功的空列表；无历史数据时列表仍为空，但有明确错误。正常时 `stale=false` 且不含 `error`。厂商密文由 Rust RSA/AES-GCM 实现处理，兼容单行 PEM 公钥；解密失败最多重建一次会话并重新读取，不自动重发短信。号码和正文输出为 UTF-8 明文；消费者不应再实现厂商会话密钥或解密逻辑。相关写操作通过 [`CONTROL_API.md`](CONTROL_API.md) 执行。
 

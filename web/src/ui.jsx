@@ -34,21 +34,22 @@ export function Panel({
   summary,
   collapsible = false,
   defaultOpen = true,
+  compact = false,
   className = "",
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const bodyId = useId();
   return (
-    <Card withBorder radius="lg" padding="lg" className={"panel " + className}>
-      <Group justify="space-between" wrap="nowrap" className="panel-heading">
-        <Group gap={10} wrap="nowrap">
+    <Card withBorder radius="lg" padding={compact?12:"lg"} className={"panel " + className}>
+      <Group justify="space-between" gap={compact?6:undefined} wrap="nowrap" className="panel-heading">
+        <Group gap={compact?6:10} wrap="nowrap">
           {Icon && (
             <span className="section-icon">
-              <Icon size={17} strokeWidth={1.8} />
+              <Icon size={compact?14:17} strokeWidth={1.8} />
             </span>
           )}
           <Box>
-            <Text fw={600} size="sm">
+            <Text fw={600} size={compact?"xs":"sm"}>
               {title}
             </Text>
             {description && (
@@ -58,11 +59,12 @@ export function Panel({
             )}
           </Box>
         </Group>
-        <Group gap="xs" wrap="nowrap">
+        <Group gap={compact?4:"xs"} wrap="nowrap">
           {right}
           {collapsible && (
             <ActionIcon
               variant="subtle"
+              size={compact?24:undefined}
               color="gray"
               aria-label={open ? "收起" + title : "展开" + title}
               aria-expanded={open}
@@ -88,7 +90,7 @@ export function Panel({
             transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
             className="panel-body"
           >
-            <Box pt="lg">{children}</Box>
+            <Box pt={compact?8:"lg"}>{children}</Box>
           </motion.div>
         )}
       </AnimatePresence>

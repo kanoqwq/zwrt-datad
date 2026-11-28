@@ -11,7 +11,7 @@ const family = (type) =>
 // Mirrors SignalCardStore's small cross-page summary, never raw packets or credentials.
 export class SignalSummaryStore {
   constructor(base) {
-    this.key = "datad.signal-summary.v1:" + base;
+    this.key = "datad.signal-summary.v3:" + base;
     this.listeners = new Set();
     this.current = null;
     this.owner = null;
@@ -56,7 +56,7 @@ export class SignalSummaryStore {
         saved.summary?.updatedAt > 0 &&
         ["LTE", "NR"].includes(saved.summary.radio)
       ) {
-        this.current = this.sanitize(saved.summary);
+        this.current = this.sanitize({...saved.summary,qosConfirmed:false});
         if (this.current.qosFamily !== this.lastFamily)
           this.current = {
             ...this.current,
@@ -85,9 +85,9 @@ export class SignalSummaryStore {
       differentOwner = this.owner && owner && this.owner !== owner;
     if (
       differentOwner ||
-      (this.lastMode && mode && this.lastMode !== mode) ||
+      (this.lastMode && mode && this.lastMode !== mode && !this.current?.qosConfirmed) ||
       (this.lastSim && sim && this.lastSim !== sim) ||
-      (nextFamily &&
+      (!this.current?.qosConfirmed && nextFamily &&
         nextFamily !== this.lastFamily &&
         this.current?.qosFamily !== nextFamily)
     )
@@ -106,11 +106,17 @@ export class SignalSummaryStore {
       ambr: session?.ambr ?? null,
       qosApn: session?.apn ?? null,
       qosFamily: cards.bearerQos.selected?.split(":")[0] ?? null,
+      qosConfirmed: !!session && cards.bearerQos.familyConfirmed,
       plmn: cards.plmn,
       cell: cards.cell,
       security: cards.security,
       vendor: cards.vendor,
       vendorDetail: cards.vendorDetail,
+      vendorResult: cards.vendorResult,
+      vendorEvidence: cards.vendorEvidence,
+      vendorState: cards.vendorState,
+      vendorLastMatch: cards.vendorLastMatch,
+      vendorCell: cards.vendorCell,
       radio: cards.radio,
       updatedAt: cards.updatedAt,
     });
@@ -144,6 +150,11 @@ export class SignalSummaryStore {
       plmn: c.plmn,
       vendor: c.vendor,
       vendorDetail: c.vendorDetail,
+      vendorResult: c.vendorResult,
+      vendorEvidence: c.vendorEvidence,
+      vendorState: c.vendorState,
+      vendorLastMatch: c.vendorLastMatch,
+      vendorCell: c.vendorCell,
       security: c.security,
       updatedAt: c.updatedAt,
       radio: c.radio,

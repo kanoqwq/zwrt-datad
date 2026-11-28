@@ -79,6 +79,7 @@ esac
             "sys/class/power_supply/battery_zte": {"online": "1", "status": "Charging", "health": "Good"},
             "sys/class/power_supply/battery": {"voltage_now": "4360000", "current_now": "-114000", "cycle_count": "103"},
             "sys/class/power_supply/charger_zte": {"present": "1", "type": "Mains"},
+            "sys/class/power_supply/usb": {"current_now": "502810", "voltage_now": "4714864"},
             "sys/class/net/bridge0": {"flags": "0x1103", "address": "b8:d4:bc:00:00:01"},
             "sys/class/net/rmnet_data0": {"flags": "0x1"},
             "sys/class/net/wlan0": {"address": "b8:d4:bc:00:00:02"},
@@ -142,6 +143,7 @@ printf 'Station b8:d4:bc:00:00:01 (on wlan0)\\nStation aa:bb:cc:00:11:22 (on wla
         assert state["system"]["mem_used_pct"] == 75 and state["system"]["uptime"] == 100
         assert state["system"]["hostname"] == "sdxprairie"
         assert state["battery"]["charging"] == 1 and state["battery"]["bat_ua"] == 114000
+        assert state["battery"]["chg_ua"] == 502810 and state["battery"]["chg_uv"] == 4714864
         assert state["battery"]["charger_type_name"] == "Mains"
         assert state["interfaces"]["wan4"]["ipv4"] == [{"address": "10.38.1.22", "mask": 30}]
         assert state["interfaces"]["wan6"]["ipv6"] == [{"address": "2001:db8::5", "mask": 64}]

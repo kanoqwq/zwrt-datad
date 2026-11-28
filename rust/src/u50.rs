@@ -1314,19 +1314,17 @@ async fn enrich(
     }
     let mcc = cfg_number(cfg, "rmcc", 0, 999).unwrap_or_default();
     let mnc = cfg_number(cfg, "rmnc", 0, 999).unwrap_or_default();
-    let qos = crate::qos::read_u50_for_plmn(mcc, mnc);
-    let available = qos.qci > 0 || !qos.ambr_dl.is_empty() || !qos.ambr_ul.is_empty();
-    fields.insert(
-        "qos".into(),
-        json!({
-            "qci":qos.qci, "ambr_dl":qos.ambr_dl, "ambr_ul":qos.ambr_ul,
-            "available":available, "source":if available {"oem_key_log"} else {"unavailable"},
-            "reason":if available {""} else {"no_oem_qos_sample"}
-        }),
-    );
+    let signaling = crate::u50_signal::block();
+    let rat = fields
+        .get("net")
+        .and_then(|net| net.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let qos = crate::u50_qos::state(&signaling, rat, || crate::qos::read_u50_for_plmn(mcc, mnc));
+    fields.insert("qos".into(), qos);
     fields.insert("interfaces".into(), u50_sys::interfaces(cfg).await);
     fields.insert("u50_diag".into(), crate::u50_diag::block());
-    fields.insert("u50_signaling".into(), crate::u50_signal::block());
+    fields.insert("u50_signaling".into(), signaling);
     if let Some(clients) = u50_sys::clients().await {
         // The OEM per-chip counters stay when they are present.
         if let Some(Value::Object(old)) = fields.get("clients") {
@@ -1833,6 +1831,25 @@ mod tests {
             cfg_from_show("nr_multi_ca_scell_info=\n")["nr_multi_ca_scell_info"],
             ""
         );
+    }
+
+    #[test]
+    fn lte_serving_bandwidth_and_band_are_not_the_allowed_band_list() {
+        for rat in ["LTE", "LTE_A", "LTE_CA", "ENDC", "NSA", "LTE-NSA"] {
+            let cfg = cfg_from_show(&format!(
+                "model_name=U50Pro\nnetwork_type={rat}\nwan_active_band=LTE BAND 8\nbandwidth=20MHz\nlte_band_lock=0x85\nnr5g_nsa_bandwidth=60MHz\n"
+            ));
+            let state = from_sources(Model::U50Pro, &cfg, None).unwrap();
+            let net = &state.fields["net"];
+            assert_eq!(net["band"], "B8", "{rat}");
+            assert_eq!(net["lte_bw"], "20MHz", "{rat}");
+            assert_eq!(net["lte_band"], "1,3,8", "{rat}");
+            assert_eq!(net["lte_bands"], "1,3,8", "{rat}");
+        }
+        let cfg = cfg_from_show("model_name=U50Pro\nnetwork_type=SA\nbandwidth=100MHz\n");
+        let state = from_sources(Model::U50Pro, &cfg, None).unwrap();
+        assert_eq!(state.fields["net"]["nr_bw"], "100MHz");
+        assert!(state.fields["net"].get("lte_bw").is_none());
     }
 
     #[test]
